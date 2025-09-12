@@ -193,14 +193,23 @@ function handleJoinRoom(clientId, message, client, ws) {
     isInitiator: isFirstUser,
     ready: userCount === 2
   }));
+  
+  log.info(`Client ${clientId} assigned as ${isFirstUser ? 'initiator' : 'receiver'} in room ${roomId}`);
 
-  // If room is full, notify both clients
+  // If room is full, notify both clients with initiator info
   if (userCount === 2) {
-    notifyRoomPeers(roomId, {
-      type: 'room_ready',
-      roomId: roomId,
-      message: 'Both users connected. Ready for WebRTC handshake.',
-      userCount: 2
+    const roomClients = Array.from(room);
+    roomClients.forEach((id, index) => {
+      const client = clients.get(id);
+      if (client && client.ws.readyState === 1) { // OPEN
+        client.ws.send(JSON.stringify({
+          type: 'room_ready',
+          roomId: roomId,
+          message: 'Both users connected. Ready for WebRTC handshake.',
+          userCount: 2,
+          isInitiator: index === 0 // First user is initiator
+        }));
+      }
     });
     log.info(`Room ${roomId} is ready - starting WebRTC signaling`);
   }
