@@ -35,7 +35,7 @@ const app = express();
 
 app.get('/', (req, res) => {
   log.info('Health check route hit from', req.ip);
-  res.send('Chat & WebRTC Signaling Server is active.');
+  res.send('WebRTC P2P Signaling Server is active.');
 });
 
 // Create an HTTP server from the Express app
@@ -123,7 +123,7 @@ wss.on('connection', (ws, req) => {
           canSendMessages: roomSize === 2
         }));
         
-        // If room is now full (2 users), notify both users that chat is ready
+        // If room is now full (2 users), notify both users that WebRTC setup can begin
         if (roomSize === 2) {
           const room = rooms.get(roomId);
           room.forEach(client => {
@@ -131,11 +131,11 @@ wss.on('connection', (ws, req) => {
               client.send(JSON.stringify({
                 type: 'room_ready',
                 roomId,
-                message: 'Both users connected. You can now send messages!'
+                message: 'Both users connected. Establishing peer-to-peer connection...'
               }));
             }
           });
-          log.info(`Room ${roomId} is now ready for chatting with 2 users.`);
+          log.info(`Room ${roomId} is ready for WebRTC connection with 2 users.`);
         } else {
           // Notify the user they're waiting for another user
           ws.send(JSON.stringify({
@@ -147,59 +147,7 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
-      // B. Case for chat messages
-      case 'chat_message': {
-        const { message } = parsedMessage.payload || {};
-        if (!message) {
-          log.warn('chat_message missing message content:', parsedMessage);
-          ws.send(JSON.stringify({ type: 'error', error: 'Missing message content' }));
-          break;
-        }
-        
-        if (!currentRoomId) {
-          log.warn('Received chat message before joining a room.');
-          ws.send(JSON.stringify({ type: 'error', error: 'Join a room before sending messages.' }));
-          break;
-        }
-        
-        const room = rooms.get(currentRoomId);
-        if (!room) {
-          log.warn(`Tried to send chat message but room not found:`, currentRoomId);
-          ws.send(JSON.stringify({ type: 'error', error: 'Room not found.' }));
-          break;
-        }
-        
-        // Check if room has exactly 2 users (both users must be connected)
-        if (room.size !== 2) {
-          log.warn(`Message rejected: Room ${currentRoomId} has ${room.size} users, need exactly 2.`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'Cannot send messages. Room must have exactly 2 users connected.' 
-          }));
-          break;
-        }
-        
-        let relayedCount = 0;
-        // Broadcast the message to the other client in the room
-        room.forEach(client => {
-          // Check if the client is not the sender and is ready to receive messages
-          if (client !== ws && client.readyState === ws.OPEN) {
-            client.send(JSON.stringify({
-              type: 'chat_message',
-              payload: {
-                message: message,
-                timestamp: parsedMessage.payload.timestamp || Date.now(),
-                sender: 'User' // You could add sender identification later
-              }
-            }));
-            relayedCount++;
-          }
-        });
-        log.info(`Relayed chat message in room: ${currentRoomId} to ${relayedCount} client(s). Message: "${message}"`);
-        break;
-      }
-
-      // C. Cases for WebRTC signaling messages (offer, answer, candidate)
+      // B. Cases for WebRTC signaling messages (offer, answer, candidate)
       // These messages are simply broadcasted to other clients in the same room.
       case 'offer':
       case 'answer':
@@ -209,22 +157,35 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ type: 'error', error: 'Join a room before sending signaling messages.' }));
           break;
         }
+        
         const room = rooms.get(currentRoomId);
-        if (room) {
-          let relayedCount = 0;
-          // Broadcast the message to every other client in the room
-          room.forEach(client => {
-            // Check if the client is not the sender and is ready to receive messages
-            if (client !== ws && client.readyState === ws.OPEN) {
-              client.send(JSON.stringify(parsedMessage));
-              relayedCount++;
-            }
-          });
-          // Log the action for debugging
-          log.info(`Relayed '${parsedMessage.type}' in room: ${currentRoomId} to ${relayedCount} client(s).`);
-        } else {
-          log.warn(`Tried to relay '${parsedMessage.type}' but room not found:`, currentRoomId);
+        if (!room) {
+          log.warn(`Tried to send signaling message but room not found:`, currentRoomId);
+          ws.send(JSON.stringify({ type: 'error', error: 'Room not found.' }));
+          break;
         }
+        
+        // Check if room has exactly 2 users for WebRTC signaling
+        if (room.size !== 2) {
+          log.warn(`Signaling rejected: Room ${currentRoomId} has ${room.size} users, need exactly 2.`);
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            error: 'Cannot establish WebRTC connection. Room must have exactly 2 users.' 
+          }));
+          break;
+        }
+        
+        let relayedCount = 0;
+        // Broadcast the message to every other client in the room
+        room.forEach(client => {
+          // Check if the client is not the sender and is ready to receive messages
+          if (client !== ws && client.readyState === ws.OPEN) {
+            client.send(JSON.stringify(parsedMessage));
+            relayedCount++;
+          }
+        });
+        // Log the action for debugging
+        log.info(`Relayed '${parsedMessage.type}' in room: ${currentRoomId} to ${relayedCount} client(s).`);
         break;
       }
 
