@@ -126,13 +126,16 @@ wss.on('connection', (ws, req) => {
         // If room is now full (2 users), notify both users that WebRTC setup can begin
         if (roomSize === 2) {
           const room = rooms.get(roomId);
+          let isFirstUser = true;
           room.forEach(client => {
             if (client.readyState === client.OPEN) {
               client.send(JSON.stringify({
                 type: 'room_ready',
                 roomId,
-                message: 'Both users connected. Establishing peer-to-peer connection...'
+                message: 'Both users connected. Establishing peer-to-peer connection...',
+                isInitiator: isFirstUser
               }));
+              isFirstUser = false; // Only first user should be initiator
             }
           });
           log.info(`Room ${roomId} is ready for WebRTC connection with 2 users.`);
