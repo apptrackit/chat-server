@@ -1,18 +1,16 @@
-// server.js
+// WebRTC P2P Signaling Server for iOS App
 
-// 1. Import necessary libraries
-// 'express' for creating the HTTP server
-// 'ws' for WebSocket communication
 const express = require('express');
 const { Server } = require('ws');
+const crypto = require('crypto');
 
-// Enhanced logging utility with color coding
+// Enhanced logging utility
 const COLORS = {
   reset: '\x1b[0m',
-  info: '\x1b[36m',      // Cyan
-  warn: '\x1b[33m',      // Yellow
-  error: '\x1b[31m',     // Red
-  debug: '\x1b[35m',     // Magenta
+  info: '\x1b[36m',
+  warn: '\x1b[33m',
+  error: '\x1b[31m',
+  debug: '\x1b[35m',
 };
 
 function getTime() {
@@ -26,250 +24,296 @@ const log = {
   debug: (...args) => console.debug(`${COLORS.debug}[DEBUG] [${getTime()}]`, ...args, COLORS.reset),
 };
 
-// 2. Server Setup
-
 const PORT = process.env.PORT || 8080;
 const app = express();
 
-// Use a basic route for health checks or info
+// CORS for all routes
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  next();
+});
 
 app.get('/', (req, res) => {
-  log.info('Health check route hit from', req.ip);
-  res.send('Chat & WebRTC Signaling Server is active.');
+  log.info('Health check from', req.ip);
+  res.send('WebRTC P2P Signaling Server Active - Ready for iOS clients');
 });
 
-// Create an HTTP server from the Express app
+// Get room info endpoint
+app.get('/rooms', (req, res) => {
+  const roomInfo = Array.from(rooms.entries()).map(([roomId, clients]) => ({
+    roomId,
+    userCount: clients.size,
+    full: clients.size >= 2
+  }));
+  res.json({ rooms: roomInfo, totalRooms: rooms.size });
+});
 
 const server = app.listen(PORT, () => {
-  log.info(`Server is listening on port: ${PORT}`);
+  log.info(`WebRTC Signaling Server listening on port ${PORT}`);
+  log.info('Ready for iOS WebRTC connections via WSS');
 });
 
-// 3. WebSocket Server Initialization
-// Attach the WebSocket server to the HTTP server
-
 const wss = new Server({ server });
-log.info('WebSocket server initialized.');
 
-// 4. In-memory data structure to store rooms and clients
-// A Map is used where:
-// key = roomId (string)
-// value = a Set of connected WebSocket clients in that room
+// Store connected clients and rooms
+const clients = new Map(); // clientId -> { ws, roomId, isInitiator }
+const rooms = new Map();   // roomId -> Set of clientIds
 
-const rooms = new Map();
-
-// 5. WebSocket Connection Handling
-// WebSocket connection handler
 wss.on('connection', (ws, req) => {
-  log.info('New client connected.', 'IP:', req.socket?.remoteAddress || 'unknown');
+  const clientId = crypto.randomUUID();
+  log.info(`iOS client connected: ${clientId}`, 'IP:', req.socket?.remoteAddress || 'unknown');
 
-  // This variable will be set when the client joins a room
-  let currentRoomId = null;
+  clients.set(clientId, { ws, roomId: null, isInitiator: false });
+  
+  // Send client their ID
+  ws.send(JSON.stringify({ 
+    type: 'connected', 
+    clientId: clientId,
+    server: 'WebRTC P2P Signaling Server'
+  }));
 
-  // 6. Handle incoming messages from clients
   ws.on('message', (message) => {
-    log.debug('Received message:', message);
     let parsedMessage;
+    
     try {
-      // Messages are expected to be in JSON format
       parsedMessage = JSON.parse(message);
+      log.debug(`Message from ${clientId}: ${parsedMessage.type}`);
     } catch (error) {
-      log.error('Failed to parse message:', message, error);
+      log.error('Invalid JSON from', clientId, ':', error.message);
       ws.send(JSON.stringify({ type: 'error', error: 'Invalid JSON format' }));
       return;
     }
 
-    // Use a switch statement to handle different message types
+    const client = clients.get(clientId);
+    if (!client) {
+      log.error(`Client ${clientId} not found`);
+      return;
+    }
+
     switch (parsedMessage.type) {
-      // A. Case for when a client wants to join a room
       case 'join_room': {
-        const { roomId } = parsedMessage.payload || {};
-        if (!roomId) {
-          log.warn('join_room message missing roomId:', parsedMessage);
-          ws.send(JSON.stringify({ type: 'error', error: 'Missing roomId in join_room' }));
-          break;
-        }
-        
-        // Check if room exists and is already full (2 users max)
-        if (rooms.has(roomId)) {
-          const room = rooms.get(roomId);
-          if (room.size >= 2) {
-            log.warn(`Room ${roomId} is full (${room.size} users). Rejecting new client.`);
-            ws.send(JSON.stringify({ 
-              type: 'error', 
-              error: 'Room is full. Maximum 2 users per room.' 
-            }));
-            break;
-          }
-        }
-        
-        currentRoomId = roomId; // Store the room ID for this connection
-
-        // If the room doesn't exist, create it
-        if (!rooms.has(roomId)) {
-          rooms.set(roomId, new Set());
-          log.info(`Created new room: ${roomId}`);
-        }
-
-        // Add the client to the specified room
-        rooms.get(roomId).add(ws);
-        const roomSize = rooms.get(roomId).size;
-        log.info(`Client joined room: ${roomId} (${roomSize}/2 users)`);
-        
-        // Notify client of successful join with room status
-        ws.send(JSON.stringify({ 
-          type: 'joined_room', 
-          roomId,
-          userCount: roomSize,
-          canSendMessages: roomSize === 2
-        }));
-        
-        // If room is now full (2 users), notify both users that chat is ready
-        if (roomSize === 2) {
-          const room = rooms.get(roomId);
-          room.forEach(client => {
-            if (client.readyState === client.OPEN) {
-              client.send(JSON.stringify({
-                type: 'room_ready',
-                roomId,
-                message: 'Both users connected. You can now send messages!'
-              }));
-            }
-          });
-          log.info(`Room ${roomId} is now ready for chatting with 2 users.`);
-        } else {
-          // Notify the user they're waiting for another user
-          ws.send(JSON.stringify({
-            type: 'waiting_for_user',
-            roomId,
-            message: 'Waiting for another user to join...'
-          }));
-        }
+        handleJoinRoom(clientId, parsedMessage, client, ws);
         break;
       }
 
-      // B. Case for chat messages
-      case 'chat_message': {
-        const { message } = parsedMessage.payload || {};
-        if (!message) {
-          log.warn('chat_message missing message content:', parsedMessage);
-          ws.send(JSON.stringify({ type: 'error', error: 'Missing message content' }));
-          break;
-        }
-        
-        if (!currentRoomId) {
-          log.warn('Received chat message before joining a room.');
-          ws.send(JSON.stringify({ type: 'error', error: 'Join a room before sending messages.' }));
-          break;
-        }
-        
-        const room = rooms.get(currentRoomId);
-        if (!room) {
-          log.warn(`Tried to send chat message but room not found:`, currentRoomId);
-          ws.send(JSON.stringify({ type: 'error', error: 'Room not found.' }));
-          break;
-        }
-        
-        // Check if room has exactly 2 users (both users must be connected)
-        if (room.size !== 2) {
-          log.warn(`Message rejected: Room ${currentRoomId} has ${room.size} users, need exactly 2.`);
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            error: 'Cannot send messages. Room must have exactly 2 users connected.' 
-          }));
-          break;
-        }
-        
-        let relayedCount = 0;
-        // Broadcast the message to the other client in the room
-        room.forEach(client => {
-          // Check if the client is not the sender and is ready to receive messages
-          if (client !== ws && client.readyState === ws.OPEN) {
-            client.send(JSON.stringify({
-              type: 'chat_message',
-              payload: {
-                message: message,
-                timestamp: parsedMessage.payload.timestamp || Date.now(),
-                sender: 'User' // You could add sender identification later
-              }
-            }));
-            relayedCount++;
-          }
-        });
-        log.info(`Relayed chat message in room: ${currentRoomId} to ${relayedCount} client(s). Message: "${message}"`);
+      case 'webrtc_offer': {
+        handleWebRTCSignaling(clientId, parsedMessage, client, 'offer');
         break;
       }
 
-      // C. Cases for WebRTC signaling messages (offer, answer, candidate)
-      // These messages are simply broadcasted to other clients in the same room.
-      case 'offer':
-      case 'answer':
+      case 'webrtc_answer': {
+        handleWebRTCSignaling(clientId, parsedMessage, client, 'answer');
+        break;
+      }
+
       case 'ice_candidate': {
-        if (!currentRoomId) {
-          log.warn(`Received signaling message (${parsedMessage.type}) before joining a room.`);
-          ws.send(JSON.stringify({ type: 'error', error: 'Join a room before sending signaling messages.' }));
-          break;
-        }
-        const room = rooms.get(currentRoomId);
-        if (room) {
-          let relayedCount = 0;
-          // Broadcast the message to every other client in the room
-          room.forEach(client => {
-            // Check if the client is not the sender and is ready to receive messages
-            if (client !== ws && client.readyState === ws.OPEN) {
-              client.send(JSON.stringify(parsedMessage));
-              relayedCount++;
-            }
-          });
-          // Log the action for debugging
-          log.info(`Relayed '${parsedMessage.type}' in room: ${currentRoomId} to ${relayedCount} client(s).`);
-        } else {
-          log.warn(`Tried to relay '${parsedMessage.type}' but room not found:`, currentRoomId);
-        }
+        handleWebRTCSignaling(clientId, parsedMessage, client, 'ice');
         break;
       }
 
-      // C. Default case for unknown message types
+      case 'ping': {
+        ws.send(JSON.stringify({ type: 'pong' }));
+        break;
+      }
+
       default:
-        log.warn('Unknown message type received:', parsedMessage.type, parsedMessage);
-        ws.send(JSON.stringify({ type: 'error', error: `Unknown message type: ${parsedMessage.type}` }));
+        log.warn(`Unknown message type from ${clientId}: ${parsedMessage.type}`);
+        ws.send(JSON.stringify({ 
+          type: 'error', 
+          error: `Unknown message type: ${parsedMessage.type}` 
+        }));
     }
   });
 
-  // 7. Handle client disconnection
   ws.on('close', (code, reason) => {
-    log.info('Client disconnected.', 'Code:', code, 'Reason:', reason?.toString() || 'none');
-    if (currentRoomId && rooms.has(currentRoomId)) {
-      const room = rooms.get(currentRoomId);
-      // Remove the disconnected client from the room
-      room.delete(ws);
-      const remainingUsers = room.size;
-      log.info(`Client removed from room: ${currentRoomId} (${remainingUsers} users remaining)`);
-
-      // Notify remaining user that the other user left (if any users remain)
-      if (remainingUsers > 0) {
-        room.forEach(client => {
-          if (client.readyState === client.OPEN) {
-            client.send(JSON.stringify({
-              type: 'user_left',
-              roomId: currentRoomId,
-              message: 'The other user has left the chat. Waiting for a new user...',
-              canSendMessages: false
-            }));
-          }
-        });
-        log.info(`Notified remaining user in room ${currentRoomId} that the other user left.`);
-      }
-
-      // If the room is now empty, delete it to clean up memory
-      if (remainingUsers === 0) {
-        rooms.delete(currentRoomId);
-        log.info(`Room is now empty and has been deleted: ${currentRoomId}`);
-      }
-    }
+    handleClientDisconnect(clientId, code, reason);
   });
 
-  // Handle potential errors
   ws.on('error', (error) => {
-    log.error('WebSocket error:', error);
+    log.error(`WebSocket error for ${clientId}:`, error.message);
   });
 });
+
+function handleJoinRoom(clientId, message, client, ws) {
+  const { roomId } = message;
+  
+  if (!roomId || typeof roomId !== 'string') {
+    ws.send(JSON.stringify({ type: 'error', error: 'Invalid roomId' }));
+    return;
+  }
+
+  // Check if room is full
+  if (rooms.has(roomId) && rooms.get(roomId).size >= 2) {
+    ws.send(JSON.stringify({ 
+      type: 'room_full', 
+      error: 'Room is full (max 2 users)',
+      roomId: roomId
+    }));
+    return;
+  }
+
+  // Remove from previous room
+  if (client.roomId && rooms.has(client.roomId)) {
+    const oldRoom = rooms.get(client.roomId);
+    oldRoom.delete(clientId);
+    if (oldRoom.size === 0) {
+      rooms.delete(client.roomId);
+      log.info(`Deleted empty room: ${client.roomId}`);
+    } else {
+      // Notify remaining client in old room
+      notifyRoomPeers(client.roomId, {
+        type: 'peer_left',
+        message: 'Other user left the room'
+      });
+    }
+  }
+
+  // Create or join room
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, new Set());
+    log.info(`Created room: ${roomId}`);
+  }
+
+  const room = rooms.get(roomId);
+  const isFirstUser = room.size === 0;
+  
+  room.add(clientId);
+  client.roomId = roomId;
+  client.isInitiator = isFirstUser;
+
+  const userCount = room.size;
+  log.info(`Client ${clientId} joined room ${roomId} (${userCount}/2 users) - ${isFirstUser ? 'Initiator' : 'Receiver'}`);
+
+  // Notify client of successful join
+  ws.send(JSON.stringify({ 
+    type: 'room_joined', 
+    roomId: roomId,
+    userCount: userCount,
+    isInitiator: isFirstUser,
+    ready: userCount === 2
+  }));
+
+  // If room is full, notify both clients
+  if (userCount === 2) {
+    notifyRoomPeers(roomId, {
+      type: 'room_ready',
+      roomId: roomId,
+      message: 'Both users connected. Ready for WebRTC handshake.',
+      userCount: 2
+    });
+    log.info(`Room ${roomId} is ready - starting WebRTC signaling`);
+  }
+}
+
+function handleWebRTCSignaling(clientId, message, client, signalType) {
+  const { roomId } = client;
+  
+  if (!roomId || !rooms.has(roomId)) {
+    client.ws.send(JSON.stringify({ 
+      type: 'error', 
+      error: 'Not in a valid room for WebRTC signaling' 
+    }));
+    return;
+  }
+
+  const room = rooms.get(roomId);
+  if (room.size !== 2) {
+    client.ws.send(JSON.stringify({ 
+      type: 'error', 
+      error: 'Room must have exactly 2 users for WebRTC' 
+    }));
+    return;
+  }
+
+  // Find the other client in the room
+  const otherClientId = Array.from(room).find(id => id !== clientId);
+  
+  if (!otherClientId) {
+    log.warn(`No peer found in room ${roomId} for ${signalType}`);
+    return;
+  }
+
+  const otherClient = clients.get(otherClientId);
+  if (!otherClient || otherClient.ws.readyState !== 1) { // 1 = OPEN
+    log.warn(`Peer ${otherClientId} not available for ${signalType}`);
+    return;
+  }
+
+  // Forward the signaling message
+  const forwardMessage = {
+    type: message.type,
+    from: clientId,
+    roomId: roomId
+  };
+
+  // Include the specific data based on signal type
+  if (signalType === 'offer' || signalType === 'answer') {
+    forwardMessage.sdp = message.sdp;
+  } else if (signalType === 'ice') {
+    forwardMessage.candidate = message.candidate;
+  }
+
+  otherClient.ws.send(JSON.stringify(forwardMessage));
+  log.info(`Forwarded ${signalType} from ${clientId} to ${otherClientId} in room ${roomId}`);
+}
+
+function handleClientDisconnect(clientId, code, reason) {
+  log.info(`Client ${clientId} disconnected - Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
+  
+  const client = clients.get(clientId);
+  if (client && client.roomId && rooms.has(client.roomId)) {
+    const roomId = client.roomId;
+    const room = rooms.get(roomId);
+    room.delete(clientId);
+    
+    // Notify remaining peer
+    if (room.size > 0) {
+      notifyRoomPeers(roomId, {
+        type: 'peer_disconnected',
+        message: 'Other user disconnected'
+      });
+    }
+    
+    // Clean up empty room
+    if (room.size === 0) {
+      rooms.delete(roomId);
+      log.info(`Deleted empty room: ${roomId}`);
+    }
+  }
+  
+  clients.delete(clientId);
+}
+
+function notifyRoomPeers(roomId, message) {
+  if (!rooms.has(roomId)) return;
+  
+  const room = rooms.get(roomId);
+  room.forEach(clientId => {
+    const client = clients.get(clientId);
+    if (client && client.ws.readyState === 1) { // OPEN
+      client.ws.send(JSON.stringify(message));
+    }
+  });
+}
+
+// Periodic cleanup of stale connections
+setInterval(() => {
+  const staleClients = [];
+  
+  clients.forEach((client, clientId) => {
+    if (client.ws.readyState !== 1) { // Not OPEN
+      staleClients.push(clientId);
+    }
+  });
+  
+  staleClients.forEach(clientId => {
+    handleClientDisconnect(clientId, 1006, 'Stale connection cleanup');
+  });
+  
+  if (staleClients.length > 0) {
+    log.info(`Cleaned up ${staleClients.length} stale connections`);
+  }
+}, 60000); // Every minute
+
+log.info('WebRTC P2P Signaling Server initialized and ready for iOS clients');
