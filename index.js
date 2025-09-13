@@ -37,6 +37,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
   log.info('Health check from', req.ip);
   res.send('WebRTC P2P Signaling Server Active - Ready for iOS clients');
+
 });
 
 // Get room info endpoint
@@ -114,6 +115,7 @@ wss.on('connection', (ws, req) => {
 
       case 'ping': {
         ws.send(JSON.stringify({ type: 'pong' }));
+
         break;
       }
 
