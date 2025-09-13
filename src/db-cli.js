@@ -25,6 +25,52 @@ function runSql(sql) {
   });
 }
 
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else { inQuotes = false; }
+      } else { cur += ch; }
+    } else {
+      if (ch === ',') { out.push(cur); cur = ''; }
+      else if (ch === '"') { inQuotes = true; }
+      else { cur += ch; }
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function runQuery(sql) {
+  return new Promise((resolve, reject) => {
+    const dbPath = getDbPath();
+    const child = spawn('sqlite3', ['-header', '-csv', dbPath, sql], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', d => (out += d.toString()));
+    child.stderr.on('data', d => (err += d.toString()));
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error(err || `sqlite3 exited with code ${code}`));
+      out = out.trim();
+      if (!out) return resolve([]);
+      const lines = out.split(/\r?\n/);
+      const header = parseCsvLine(lines[0]);
+      const rows = lines.slice(1).map(line => {
+        const cols = parseCsvLine(line);
+        const obj = {};
+        header.forEach((h, idx) => { obj[h] = cols[idx] === undefined ? null : cols[idx]; });
+        return obj;
+      });
+      resolve(rows);
+    });
+  });
+}
+
 async function onJoin(roomId, clientId, isFirstUser) {
   const expSql = "datetime('now','+1 hour')";
   const rid = escapeSql(roomId);
@@ -66,6 +112,43 @@ async function deleteRoom(roomId) {
 
 module.exports = {
   createDbClient() {
-    return { onJoin, onLeave, deleteRoom };
+    async function createRoom({ roomid, exp, client1 }) {
+      const rid = escapeSql(roomid);
+      const expv = escapeSql(exp);
+      const c1 = escapeSql(client1);
+      const sql = `BEGIN;
+INSERT INTO rooms(roomid, exp, client1, client2, status) VALUES (${rid}, ${expv}, ${c1}, NULL, 0);
+COMMIT;`;
+      await runSql(sql);
+      const [row] = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
+      return row || null;
+    }
+
+    async function acceptRoom({ roomid, client2 }) {
+      const rid = escapeSql(roomid);
+      const c2 = escapeSql(client2);
+      const sql = `BEGIN;
+UPDATE rooms SET client2=${c2}, status=1 WHERE roomid=${rid} AND status=0 AND exp > CURRENT_TIMESTAMP;
+SELECT changes() AS changes;
+COMMIT;`;
+      const rows = await runQuery(sql);
+      const changes = rows?.[0]?.changes ? parseInt(rows[0].changes, 10) : 0;
+      if (Number.isNaN(changes)) return 0;
+      return changes;
+    }
+
+    async function getRoom(roomid) {
+      const rid = escapeSql(roomid);
+      const rows = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
+      return rows[0] || null;
+    }
+
+    async function cleanupExpired() {
+      const rows = await runQuery(`BEGIN; DELETE FROM rooms WHERE status=0 AND exp <= CURRENT_TIMESTAMP; SELECT changes() AS deleted; COMMIT;`);
+      const deleted = rows?.[0]?.deleted ? parseInt(rows[0].deleted, 10) : 0;
+      return Number.isNaN(deleted) ? 0 : deleted;
+    }
+
+    return { onJoin, onLeave, deleteRoom, createRoom, acceptRoom, getRoom, cleanupExpired };
   }
 };

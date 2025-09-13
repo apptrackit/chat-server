@@ -37,6 +37,7 @@ const log = {
 
 const PORT = process.env.PORT || 8080;
 const app = express();
+app.use(express.json());
 
 // CORS for all routes
 app.use((req, res, next) => {
@@ -50,6 +51,55 @@ app.get('/', (req, res) => {
   res.send('WebRTC P2P Signaling Server Active - Ready for iOS clients');
 
 });
+
+// --- REST: Room management over SQLite ---
+if (USE_DB) {
+  // Create a new room (client1)
+  app.post('/api/rooms', async (req, res) => {
+    try {
+      const { roomid, exp, client1 } = req.body || {};
+      if (!roomid || !exp || !client1) return res.status(400).json({ error: 'roomid, exp, client1 required' });
+      const room = await dbHooks.createRoom({ roomid, exp, client1 });
+      return res.status(201).json(room);
+    } catch (e) {
+      log.error('Create room failed:', e.message);
+      return res.status(500).json({ error: 'create_failed' });
+    }
+  });
+
+  // Accept a room (client2 joins) - roomid must be in body
+  app.post('/api/rooms/accept', async (req, res) => {
+    try {
+      const { roomid, client2 } = req.body || {};
+      if (!roomid || !client2) return res.status(400).json({ error: 'roomid, client2 required' });
+      const changed = await dbHooks.acceptRoom({ roomid, client2 });
+      if (changed === 0) return res.status(409).json({ error: 'not_acceptable_or_expired' });
+      const room = await dbHooks.getRoom(roomid);
+      return res.json(room);
+    } catch (e) {
+      log.error('Accept room failed:', e.message);
+      return res.status(500).json({ error: 'accept_failed' });
+    }
+  });
+
+  // Get room state - roomid must be in body (POST)
+  app.post('/api/rooms/get', async (req, res) => {
+    try {
+      const { roomid } = req.body || {};
+      if (!roomid) return res.status(400).json({ error: 'roomid required' });
+      const room = await dbHooks.getRoom(roomid);
+      if (!room) return res.status(404).json({ error: 'not_found' });
+      return res.json(room);
+    } catch (e) {
+      log.error('Get room failed:', e.message);
+      return res.status(500).json({ error: 'get_failed' });
+    }
+  });
+
+  // Legacy routes return 410 Gone to steer clients to use body-based endpoints
+  app.post('/api/rooms/:roomid/accept', (req, res) => res.status(410).json({ error: 'use_body_endpoint', endpoint: '/api/rooms/accept' }));
+  app.get('/api/rooms/:roomid', (req, res) => res.status(410).json({ error: 'use_body_endpoint', endpoint: '/api/rooms/get' }));
+}
 
 // Get room info endpoint
 app.get('/rooms', (req, res) => {
@@ -407,5 +457,17 @@ setInterval(() => {
     log.info(`Cleaned up ${staleClients.length} stale connections`);
   }
 }, 60000); // Every minute
+
+// Periodic cleanup of expired pending rooms
+if (USE_DB && dbHooks?.cleanupExpired) {
+  setInterval(async () => {
+    try {
+      const deleted = await dbHooks.cleanupExpired();
+      if (deleted > 0) log.info(`Cleaned up ${deleted} expired pending rooms`);
+    } catch (e) {
+      log.warn('Expired cleanup failed:', e.message);
+    }
+  }, 60000);
+}
 
 log.info('WebRTC P2P Signaling Server initialized and ready for clients');
