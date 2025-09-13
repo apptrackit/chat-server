@@ -98,6 +98,11 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      case 'leave_room': {
+        handleLeaveRoom(clientId, client, ws);
+        break;
+      }
+
       case 'webrtc_offer': {
         handleWebRTCSignaling(clientId, parsedMessage, client, 'offer');
         break;
@@ -267,6 +272,37 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
 
   otherClient.ws.send(JSON.stringify(forwardMessage));
   log.info(`Forwarded ${signalType} from ${clientId} to ${otherClientId} in room ${roomId}`);
+}
+
+function handleLeaveRoom(clientId, client, ws) {
+  const { roomId } = client;
+  if (!roomId || !rooms.has(roomId)) {
+    ws.send(JSON.stringify({ type: 'left_room', roomId: null }));
+    return;
+  }
+
+  const room = rooms.get(roomId);
+  room.delete(clientId);
+
+  // Notify remaining peers in the room
+  notifyRoomPeers(roomId, {
+    type: 'peer_left',
+    message: 'Other user left the room'
+  });
+
+  // Clean up empty room
+  if (room.size === 0) {
+    rooms.delete(roomId);
+    log.info(`Deleted empty room: ${roomId}`);
+  }
+
+  // Clear client's room association
+  client.roomId = null;
+  client.isInitiator = false;
+
+  // Confirm to leaver
+  ws.send(JSON.stringify({ type: 'left_room', roomId }));
+  log.info(`Client ${clientId} left room ${roomId}`);
 }
 
 function handleClientDisconnect(clientId, code, reason) {
