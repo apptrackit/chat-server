@@ -4,6 +4,16 @@
 const express = require('express');
 const { Server } = require('ws');
 const crypto = require('crypto');
+const USE_DB = process.env.USE_SQLITE === '1' || process.env.USE_SQLITE === 'true';
+let dbHooks;
+if (USE_DB) {
+  try {
+    dbHooks = require('./src/db-cli').createDbClient();
+    console.log('[DB] SQLite hooks enabled');
+  } catch (e) {
+    console.warn('[DB] hooks unavailable:', e.message);
+  }
+}
 
 // Enhanced logging utility
 const COLORS = {
@@ -190,6 +200,7 @@ function handleJoinRoom(clientId, message, client, ws) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, new Set());
     log.info(`Created room: ${roomId}`);
+  // DB will be updated on join below
   }
 
   const room = rooms.get(roomId);
@@ -199,8 +210,11 @@ function handleJoinRoom(clientId, message, client, ws) {
   client.roomId = roomId;
   client.isInitiator = isFirstUser;
 
+  // no-op DB hook
+
   const userCount = room.size;
   log.info(`Client ${clientId} joined room ${roomId} (${userCount}/2 users) - ${isFirstUser ? 'Initiator' : 'Receiver'}`);
+  if (dbHooks) dbHooks.onJoin(roomId, clientId, isFirstUser);
 
   // Notify client of successful join
   ws.send(JSON.stringify({ 
@@ -229,6 +243,7 @@ function handleJoinRoom(clientId, message, client, ws) {
       }
     });
     log.info(`Room ${roomId} is ready - starting WebRTC signaling`);
+  // no-op DB hook
   }
 }
 
@@ -286,6 +301,7 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
 
   otherClient.ws.send(JSON.stringify(forwardMessage));
   log.info(`Forwarded ${signalType} from ${clientId} to ${otherClientId} in room ${roomId}`);
+  // no-op DB hook
 }
 
 function handleLeaveRoom(clientId, client, ws) {
@@ -312,6 +328,7 @@ function handleLeaveRoom(clientId, client, ws) {
   if (room.size === 0) {
     rooms.delete(roomId);
     log.info(`Deleted empty room: ${roomId}`);
+  if (dbHooks) dbHooks.deleteRoom(roomId);
   }
 
   // Clear client's room association
@@ -321,6 +338,7 @@ function handleLeaveRoom(clientId, client, ws) {
   // Confirm to leaver
   ws.send(JSON.stringify({ type: 'left_room', roomId }));
   log.info(`Client ${clientId} left room ${roomId}`);
+  if (dbHooks) dbHooks.onLeave(roomId, clientId);
 }
 
 function handleClientDisconnect(clientId, code, reason) {
@@ -348,10 +366,12 @@ function handleClientDisconnect(clientId, code, reason) {
     if (room.size === 0) {
       rooms.delete(roomId);
       log.info(`Deleted empty room: ${roomId}`);
+    if (dbHooks) dbHooks.deleteRoom(roomId);
     }
   }
   
   clients.delete(clientId);
+  if (dbHooks && client && client.roomId) dbHooks.onLeave(client.roomId, clientId);
 }
 
 function notifyRoomPeers(roomId, message) {

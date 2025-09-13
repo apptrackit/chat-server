@@ -219,6 +219,7 @@ PORT=8080
 Run signaling only (without Docker)
 ```bash
 npm install
+npm run db:init
 npm run dev
 ```
 
@@ -230,4 +231,30 @@ docker compose up --build
 Access
 - Signaling: http://localhost:8080 (upgrades to WS)
 - TURN: provided by coturn container (host networking if configured)
+
+---
+
+## SQLite Setup
+
+This project can optionally persist lightweight room/client/message metadata in a local SQLite database using `better-sqlite3`.
+
+Defaults
+- DB file: `./data/chat.db` (override with `SQLITE_DB_PATH=/custom/path.db`)
+- Schema file: `./scripts/init-db.sql`
+
+Initialize the DB
+```bash
+npm install
+npm run db:init
+```
+
+Environment
+```bash
+# optional; defaults to ./data/chat.db
+export SQLITE_DB_PATH=$PWD/data/chat.db
+```
+
+Notes
+- Server starts even if the DB is not available; DB calls are best-effort.
+- WAL mode is enabled for safe concurrent reads.
 
