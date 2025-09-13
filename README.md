@@ -7,6 +7,7 @@ Contents
 - Components and responsibilities
 - Message types and schemas
 - Room lifecycle and step-by-step flows
+- How it works (rooms API)
 - Deployment (Docker Compose, environment)
 - Reverse proxy for WSS
 - TURN: purpose, config, and ports
@@ -101,6 +102,41 @@ Health and cleanup:
 11) A periodic sweep removes stale client entries if sockets are no longer open.
 
 ---
+
+## How it works (rooms API)
+
+Simple contract for pairing two devices using a single `rooms` table:
+
+- Create room (client1)
+	- Client1 generates a long `roomid`, picks an ISO8601 `exp` time, and sends its hashed device id as `client1`.
+	- Server stores: `{ roomid, exp, client1, client2: null, status: 0 }`.
+
+- Accept room (client2)
+	- Client2 sends its hashed device id (`client2`) and the `roomid` to accept.
+	- If `status = 0` and `exp > now`, server sets `client2`, `status = 1` and returns the row.
+	- If expired or already accepted, returns a 409.
+
+- Expiration cleanup
+	- Every minute, the server deletes rows with `status = 0 AND exp <= CURRENT_TIMESTAMP`.
+
+Endpoints
+- POST `/api/rooms`
+	- Body: `{ roomid: string(<=32), exp: string(ISO8601), client1: string(<=128) }`
+	- Returns: `201 { roomid, exp, client1, client2, status }`
+
+- POST `/api/rooms/accept`
+	- Body: `{ roomid: string, client2: string(<=128) }`
+	- Success: `200 { roomid, exp, client1, client2, status: 1 }`
+	- Failure: `409 { error: "not_acceptable_or_expired" }`
+
+- POST `/api/rooms/get`
+	- Body: `{ roomid: string }`
+	- Returns: `200 { roomid, exp, client1, client2, status }` or `404` if not found
+
+Notes
+- Send `exp` as an ISO8601 UTC string, e.g. `2025-09-13T18:00:00Z`.
+- Data is stored in SQLite at `./data/chat.db` (configurable via `SQLITE_DB_PATH`).
+- This API is enabled when `USE_SQLITE=1` is set (enabled by default in Docker Compose).
 
 ## Deployment (Docker Compose)
 
@@ -236,7 +272,7 @@ Access
 
 ## SQLite Setup
 
-This project can optionally persist lightweight room/client/message metadata in a local SQLite database using `better-sqlite3`.
+This project uses the `sqlite3` CLI (no native Node addons) to initialize and access a simple `rooms` table.
 
 Defaults
 - DB file: `./data/chat.db` (override with `SQLITE_DB_PATH=/custom/path.db`)
@@ -248,6 +284,11 @@ npm install
 npm run db:init
 ```
 
+Enable API and DB hooks
+```bash
+USE_SQLITE=1 npm run dev
+```
+
 Environment
 ```bash
 # optional; defaults to ./data/chat.db
@@ -255,6 +296,6 @@ export SQLITE_DB_PATH=$PWD/data/chat.db
 ```
 
 Notes
-- Server starts even if the DB is not available; DB calls are best-effort.
-- WAL mode is enabled for safe concurrent reads.
+- Docker Compose installs `sqlite` in the container and runs `npm run db:init` automatically.
+- If `USE_SQLITE` is not set, the Rooms API is disabled.
 
