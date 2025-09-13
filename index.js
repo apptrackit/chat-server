@@ -52,17 +52,23 @@ app.get('/', (req, res) => {
 
 });
 
+// Helper to present room objects with computed flags
+function presentRoom(room) {
+  if (!room) return null;
+  return { ...room, ready: Number(room.status) === 1 };
+}
+
 // --- REST: Room management over SQLite ---
 if (USE_DB) {
   // Create a new room (client1)
   app.post('/api/rooms', async (req, res) => {
     try {
-      const { roomid, exp, client1 } = req.body || {};
+  const { roomid, exp, client1 } = req.body || {};
   log.info('HTTP POST /api/rooms', { roomid, exp, client1_len: client1?.length });
       if (!roomid || !exp || !client1) return res.status(400).json({ error: 'roomid, exp, client1 required' });
   const room = await dbHooks.createRoom({ roomid, exp, client1 });
   log.info('Created room', room);
-      return res.status(201).json(room);
+  return res.status(201).json(presentRoom(room));
     } catch (e) {
   log.error('Create room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'create_failed' });
@@ -77,9 +83,9 @@ if (USE_DB) {
       if (!roomid || !client2) return res.status(400).json({ error: 'roomid, client2 required' });
       const changed = await dbHooks.acceptRoom({ roomid, client2 });
       if (changed === 0) return res.status(409).json({ error: 'not_acceptable_or_expired' });
-      const room = await dbHooks.getRoom(roomid);
+  const room = await dbHooks.getRoom(roomid);
   log.info('Accepted room', room);
-      return res.json(room);
+  return res.json(presentRoom(room));
     } catch (e) {
   log.error('Accept room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'accept_failed' });
@@ -95,7 +101,7 @@ if (USE_DB) {
       const room = await dbHooks.getRoom(roomid);
       if (!room) return res.status(404).json({ error: 'not_found' });
   log.info('Fetched room', room);
-      return res.json(room);
+  return res.json(presentRoom(room));
     } catch (e) {
   log.error('Get room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'get_failed' });
