@@ -13,7 +13,6 @@ services:
       - "${PORT:-8080}:${PORT:-8080}"
     volumes:
       - ./:/usr/src/app
-      # Anonymous volume to keep container's node_modules separate from host
       - /usr/src/app/node_modules
     command: sh -c "npm install && npm run dev"
     healthcheck:
@@ -26,12 +25,6 @@ services:
   turn-server:
     image: coturn/coturn:latest
     container_name: turn-server
-    ports:
-      - "3478:3478"
-      - "3478:3478/udp"
-      - "5349:5349"
-      - "5349:5349/udp"
-      - "49152-65535:49152-65535/udp"
     volumes:
       - ./turn-server/turnserver.conf:/etc/coturn/turnserver.conf
     command: ["-c", "/etc/coturn/turnserver.conf"]
