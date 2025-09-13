@@ -22,3 +22,18 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+
+  turn-server:
+    image: coturn/coturn:latest
+    container_name: turn-server
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "5349:5349"
+      - "5349:5349/udp"
+      - "49152-65535:49152-65535/udp"
+    volumes:
+      - ./turn-server/turnserver.conf:/etc/coturn/turnserver.conf
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    restart: unless-stopped
+    network_mode: host
