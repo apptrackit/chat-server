@@ -1,4 +1,5 @@
-// WebRTC P2P Signaling Server for iOS App
+// WebRTC P2P Signaling Server
+// Purpose: Room-based signaling for WebRTC peers (mobile/web). Handles join/leave, offer/answer, and ICE.
 
 const express = require('express');
 const { Server } = require('ws');
@@ -52,18 +53,23 @@ app.get('/rooms', (req, res) => {
 
 const server = app.listen(PORT, () => {
   log.info(`WebRTC Signaling Server listening on port ${PORT}`);
-  log.info('Ready for iOS WebRTC connections via WSS');
+  log.info('Ready for WebRTC connections via WSS');
 });
 
 const wss = new Server({ server });
 
 // Store connected clients and rooms
-const clients = new Map(); // clientId -> { ws, roomId, isInitiator }
-const rooms = new Map();   // roomId -> Set of clientIds
+// clients: clientId -> { ws, roomId, isInitiator }
+// rooms:   roomId   -> Set<clientId>
+const clients = new Map();
+const rooms = new Map();
+
+// WebSocket readyState constant for readability
+const WS_OPEN = 1;
 
 wss.on('connection', (ws, req) => {
   const clientId = crypto.randomUUID();
-  log.info(`iOS client connected: ${clientId}`, 'IP:', req.socket?.remoteAddress || 'unknown');
+  log.info(`Client connected: ${clientId}`, 'IP:', req.socket?.remoteAddress || 'unknown');
 
   clients.set(clientId, { ws, roomId: null, isInitiator: false });
   
@@ -143,6 +149,10 @@ wss.on('connection', (ws, req) => {
 });
 
 function handleJoinRoom(clientId, message, client, ws) {
+  /**
+   * Add client to a room (creating it if needed). First client becomes initiator.
+   * Notifies when room is ready (2 users) with initiator flag so only one creates an offer.
+   */
   const { roomId } = message;
   
   if (!roomId || typeof roomId !== 'string') {
@@ -208,7 +218,7 @@ function handleJoinRoom(clientId, message, client, ws) {
     const roomClients = Array.from(room);
     roomClients.forEach((id, index) => {
       const client = clients.get(id);
-      if (client && client.ws.readyState === 1) { // OPEN
+    if (client && client.ws.readyState === WS_OPEN) { // OPEN
         client.ws.send(JSON.stringify({
           type: 'room_ready',
           roomId: roomId,
@@ -223,6 +233,10 @@ function handleJoinRoom(clientId, message, client, ws) {
 }
 
 function handleWebRTCSignaling(clientId, message, client, signalType) {
+  /**
+   * Forwards offer/answer/ice messages to the peer in the same room.
+   * Ensures exactly two users are present and the peer is available.
+   */
   const { roomId } = client;
   
   if (!roomId || !rooms.has(roomId)) {
@@ -251,7 +265,7 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
   }
 
   const otherClient = clients.get(otherClientId);
-  if (!otherClient || otherClient.ws.readyState !== 1) { // 1 = OPEN
+  if (!otherClient || otherClient.ws.readyState !== WS_OPEN) { // OPEN
     log.warn(`Peer ${otherClientId} not available for ${signalType}`);
     return;
   }
@@ -275,6 +289,10 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
 }
 
 function handleLeaveRoom(clientId, client, ws) {
+  /**
+   * Removes the client from its current room, notifies the remaining peer,
+   * deletes the room if empty, and confirms to the leaver.
+   */
   const { roomId } = client;
   if (!roomId || !rooms.has(roomId)) {
     ws.send(JSON.stringify({ type: 'left_room', roomId: null }));
@@ -306,6 +324,10 @@ function handleLeaveRoom(clientId, client, ws) {
 }
 
 function handleClientDisconnect(clientId, code, reason) {
+  /**
+   * Cleanup when a client connection closes. Removes from room, notifies peer,
+   * and deletes the room if it becomes empty.
+   */
   log.info(`Client ${clientId} disconnected - Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
   
   const client = clients.get(clientId);
@@ -333,12 +355,15 @@ function handleClientDisconnect(clientId, code, reason) {
 }
 
 function notifyRoomPeers(roomId, message) {
+  /**
+   * Broadcast a message to all clients currently in a room.
+   */
   if (!rooms.has(roomId)) return;
   
   const room = rooms.get(roomId);
   room.forEach(clientId => {
     const client = clients.get(clientId);
-    if (client && client.ws.readyState === 1) { // OPEN
+    if (client && client.ws.readyState === WS_OPEN) { // OPEN
       client.ws.send(JSON.stringify(message));
     }
   });
@@ -363,4 +388,4 @@ setInterval(() => {
   }
 }, 60000); // Every minute
 
-log.info('WebRTC P2P Signaling Server initialized and ready for iOS clients');
+log.info('WebRTC P2P Signaling Server initialized and ready for clients');
