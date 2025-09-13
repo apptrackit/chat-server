@@ -58,11 +58,13 @@ if (USE_DB) {
   app.post('/api/rooms', async (req, res) => {
     try {
       const { roomid, exp, client1 } = req.body || {};
+  log.info('HTTP POST /api/rooms', { roomid, exp, client1_len: client1?.length });
       if (!roomid || !exp || !client1) return res.status(400).json({ error: 'roomid, exp, client1 required' });
-      const room = await dbHooks.createRoom({ roomid, exp, client1 });
+  const room = await dbHooks.createRoom({ roomid, exp, client1 });
+  log.info('Created room', room);
       return res.status(201).json(room);
     } catch (e) {
-      log.error('Create room failed:', e.message);
+  log.error('Create room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'create_failed' });
     }
   });
@@ -70,14 +72,16 @@ if (USE_DB) {
   // Accept a room (client2 joins) - roomid must be in body
   app.post('/api/rooms/accept', async (req, res) => {
     try {
-      const { roomid, client2 } = req.body || {};
+  const { roomid, client2 } = req.body || {};
+  log.info('HTTP POST /api/rooms/accept', { roomid, client2_len: client2?.length });
       if (!roomid || !client2) return res.status(400).json({ error: 'roomid, client2 required' });
       const changed = await dbHooks.acceptRoom({ roomid, client2 });
       if (changed === 0) return res.status(409).json({ error: 'not_acceptable_or_expired' });
       const room = await dbHooks.getRoom(roomid);
+  log.info('Accepted room', room);
       return res.json(room);
     } catch (e) {
-      log.error('Accept room failed:', e.message);
+  log.error('Accept room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'accept_failed' });
     }
   });
@@ -85,13 +89,15 @@ if (USE_DB) {
   // Get room state - roomid must be in body (POST)
   app.post('/api/rooms/get', async (req, res) => {
     try {
-      const { roomid } = req.body || {};
+  const { roomid } = req.body || {};
+  log.info('HTTP POST /api/rooms/get', { roomid });
       if (!roomid) return res.status(400).json({ error: 'roomid required' });
       const room = await dbHooks.getRoom(roomid);
       if (!room) return res.status(404).json({ error: 'not_found' });
+  log.info('Fetched room', room);
       return res.json(room);
     } catch (e) {
-      log.error('Get room failed:', e.message);
+  log.error('Get room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'get_failed' });
     }
   });

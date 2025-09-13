@@ -12,6 +12,9 @@ function escapeSql(str) {
 
 function runSql(sql) {
   return new Promise((resolve, reject) => {
+    if (process.env.LOG_SQL === '1') {
+      console.log('[SQL]', sql.replaceAll('\n', ' '));
+    }
     const dbPath = getDbPath();
     const child = spawn('sqlite3', [dbPath], { stdio: ['pipe', 'ignore', 'pipe'] });
     let err = '';
@@ -48,6 +51,9 @@ function parseCsvLine(line) {
 
 function runQuery(sql) {
   return new Promise((resolve, reject) => {
+    if (process.env.LOG_SQL === '1') {
+      console.log('[SQL]', sql.replaceAll('\n', ' '));
+    }
     const dbPath = getDbPath();
     const child = spawn('sqlite3', ['-header', '-csv', dbPath, sql], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -69,6 +75,22 @@ function runQuery(sql) {
       resolve(rows);
     });
   });
+}
+
+function normalizeRoom(row) {
+  if (!row) return null;
+  const statusNum = (() => {
+    const n = parseInt(row.status, 10);
+    return Number.isNaN(n) ? 0 : n;
+  })();
+  const client2 = row.client2 === '' ? null : row.client2;
+  return {
+    roomid: row.roomid,
+    exp: row.exp,
+    client1: row.client1,
+    client2,
+    status: statusNum,
+  };
 }
 
 async function onJoin(roomId, clientId, isFirstUser) {
@@ -120,8 +142,8 @@ module.exports = {
 INSERT INTO rooms(roomid, exp, client1, client2, status) VALUES (${rid}, ${expv}, ${c1}, NULL, 0);
 COMMIT;`;
       await runSql(sql);
-      const [row] = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
-      return row || null;
+  const [row] = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
+  return normalizeRoom(row);
     }
 
     async function acceptRoom({ roomid, client2 }) {
@@ -139,8 +161,8 @@ COMMIT;`;
 
     async function getRoom(roomid) {
       const rid = escapeSql(roomid);
-      const rows = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
-      return rows[0] || null;
+  const rows = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
+  return normalizeRoom(rows[0]);
     }
 
     async function cleanupExpired() {
