@@ -4,6 +4,16 @@
 const express = require('express');
 const { Server } = require('ws');
 const crypto = require('crypto');
+const USE_DB = process.env.USE_SQLITE === '1' || process.env.USE_SQLITE === 'true';
+let dbHooks;
+if (USE_DB) {
+  try {
+    dbHooks = require('./src/db-cli').createDbClient();
+    console.log('[DB] SQLite hooks enabled');
+  } catch (e) {
+    console.warn('[DB] hooks unavailable:', e.message);
+  }
+}
 
 // Enhanced logging utility
 const COLORS = {
@@ -27,6 +37,7 @@ const log = {
 
 const PORT = process.env.PORT || 8080;
 const app = express();
+app.use(express.json());
 
 // CORS for all routes
 app.use((req, res, next) => {
@@ -40,6 +51,67 @@ app.get('/', (req, res) => {
   res.send('WebRTC P2P Signaling Server Active - Ready for iOS clients');
 
 });
+
+// Helper to present room objects with computed flags
+function presentRoom(room) {
+  if (!room) return null;
+  return { ...room, ready: Number(room.status) === 1 };
+}
+
+// --- REST: Room management over SQLite ---
+if (USE_DB) {
+  // Create a new room (client1)
+  app.post('/api/rooms', async (req, res) => {
+    try {
+  const { roomid, exp, client1 } = req.body || {};
+  log.info('HTTP POST /api/rooms', { roomid, exp, client1_len: client1?.length });
+      if (!roomid || !exp || !client1) return res.status(400).json({ error: 'roomid, exp, client1 required' });
+  const room = await dbHooks.createRoom({ roomid, exp, client1 });
+  log.info('Created room', room);
+  return res.status(201).json(presentRoom(room));
+    } catch (e) {
+  log.error('Create room failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'create_failed' });
+    }
+  });
+
+  // Accept a room (client2 joins) - roomid must be in body
+  app.post('/api/rooms/accept', async (req, res) => {
+    try {
+  const { roomid, client2 } = req.body || {};
+  log.info('HTTP POST /api/rooms/accept', { roomid, client2_len: client2?.length });
+      if (!roomid || !client2) return res.status(400).json({ error: 'roomid, client2 required' });
+      const changed = await dbHooks.acceptRoom({ roomid, client2 });
+      if (changed === 0) return res.status(409).json({ error: 'not_acceptable_or_expired' });
+  const room = await dbHooks.getRoom(roomid);
+  log.info('Accepted room', room);
+  return res.json(presentRoom(room));
+    } catch (e) {
+  log.error('Accept room failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'accept_failed' });
+    }
+  });
+
+  // Get room state - roomid must be in body (POST)
+  app.post('/api/rooms/get', async (req, res) => {
+    try {
+  const { roomid } = req.body || {};
+  log.info('HTTP POST /api/rooms/get', { roomid });
+      if (!roomid) return res.status(400).json({ error: 'roomid required' });
+      const room = await dbHooks.getRoom(roomid);
+      if (!room) return res.status(404).json({ error: 'not_found' });
+  log.info('Fetched room', room);
+  return res.json(presentRoom(room));
+    } catch (e) {
+  log.error('Get room failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'get_failed' });
+    }
+  });
+
+  // Legacy routes return 410 Gone to steer clients to use body-based endpoints
+  app.post('/api/rooms/:roomid/accept', (req, res) => res.status(410).json({ error: 'use_body_endpoint', endpoint: '/api/rooms/accept' }));
+  app.get('/api/rooms/:roomid', (req, res) => res.status(410).json({ error: 'use_body_endpoint', endpoint: '/api/rooms/get' }));
+}
 
 // Get room info endpoint
 app.get('/rooms', (req, res) => {
@@ -190,6 +262,7 @@ function handleJoinRoom(clientId, message, client, ws) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, new Set());
     log.info(`Created room: ${roomId}`);
+  // DB will be updated on join below
   }
 
   const room = rooms.get(roomId);
@@ -199,8 +272,11 @@ function handleJoinRoom(clientId, message, client, ws) {
   client.roomId = roomId;
   client.isInitiator = isFirstUser;
 
+  // no-op DB hook
+
   const userCount = room.size;
   log.info(`Client ${clientId} joined room ${roomId} (${userCount}/2 users) - ${isFirstUser ? 'Initiator' : 'Receiver'}`);
+  if (dbHooks) dbHooks.onJoin(roomId, clientId, isFirstUser);
 
   // Notify client of successful join
   ws.send(JSON.stringify({ 
@@ -229,6 +305,7 @@ function handleJoinRoom(clientId, message, client, ws) {
       }
     });
     log.info(`Room ${roomId} is ready - starting WebRTC signaling`);
+  // no-op DB hook
   }
 }
 
@@ -286,6 +363,7 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
 
   otherClient.ws.send(JSON.stringify(forwardMessage));
   log.info(`Forwarded ${signalType} from ${clientId} to ${otherClientId} in room ${roomId}`);
+  // no-op DB hook
 }
 
 function handleLeaveRoom(clientId, client, ws) {
@@ -312,6 +390,7 @@ function handleLeaveRoom(clientId, client, ws) {
   if (room.size === 0) {
     rooms.delete(roomId);
     log.info(`Deleted empty room: ${roomId}`);
+  if (dbHooks) dbHooks.deleteRoom(roomId);
   }
 
   // Clear client's room association
@@ -321,6 +400,7 @@ function handleLeaveRoom(clientId, client, ws) {
   // Confirm to leaver
   ws.send(JSON.stringify({ type: 'left_room', roomId }));
   log.info(`Client ${clientId} left room ${roomId}`);
+  if (dbHooks) dbHooks.onLeave(roomId, clientId);
 }
 
 function handleClientDisconnect(clientId, code, reason) {
@@ -348,10 +428,12 @@ function handleClientDisconnect(clientId, code, reason) {
     if (room.size === 0) {
       rooms.delete(roomId);
       log.info(`Deleted empty room: ${roomId}`);
+    if (dbHooks) dbHooks.deleteRoom(roomId);
     }
   }
   
   clients.delete(clientId);
+  if (dbHooks && client && client.roomId) dbHooks.onLeave(client.roomId, clientId);
 }
 
 function notifyRoomPeers(roomId, message) {
@@ -387,5 +469,17 @@ setInterval(() => {
     log.info(`Cleaned up ${staleClients.length} stale connections`);
   }
 }, 60000); // Every minute
+
+// Periodic cleanup of expired pending rooms
+if (USE_DB && dbHooks?.cleanupExpired) {
+  setInterval(async () => {
+    try {
+      const deleted = await dbHooks.cleanupExpired();
+      if (deleted > 0) log.info(`Cleaned up ${deleted} expired pending rooms`);
+    } catch (e) {
+      log.warn('Expired cleanup failed:', e.message);
+    }
+  }, 60000);
+}
 
 log.info('WebRTC P2P Signaling Server initialized and ready for clients');
