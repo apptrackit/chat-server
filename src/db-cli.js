@@ -77,100 +77,71 @@ function runQuery(sql) {
   });
 }
 
-function normalizeRoom(row) {
-  if (!row) return null;
-  const statusNum = (() => {
-    const n = parseInt(row.status, 10);
-    return Number.isNaN(n) ? 0 : n;
-  })();
-  const client2 = row.client2 === '' ? null : row.client2;
-  return {
-    roomid: row.roomid,
-    exp: row.exp,
-    client1: row.client1,
-    client2,
-    status: statusNum,
-  };
-}
-
-async function onJoin(roomId, clientId, isFirstUser) {
-  const expSql = "datetime('now','+1 hour')";
-  const rid = escapeSql(roomId);
-  const cid = escapeSql(clientId);
-
-  if (isFirstUser) {
-    const sql = `BEGIN;
-INSERT OR IGNORE INTO rooms(roomid, exp, client1, client2, status) VALUES (${rid}, ${expSql}, ${cid}, NULL, 0);
-UPDATE rooms SET client1=${cid}, client2=CASE WHEN client2 IS NULL THEN NULL ELSE client2 END, exp=${expSql}, status=0 WHERE roomid=${rid};
-COMMIT;`;
-    try { await runSql(sql); } catch (e) { /* ignore but available for logs */ }
-  } else {
-    const sql = `BEGIN;
-UPDATE rooms SET client2=${cid}, status=1 WHERE roomid=${rid};
-COMMIT;`;
-    try { await runSql(sql); } catch (e) { /* ignore */ }
-  }
-}
-
-async function onLeave(roomId, clientId) {
-  const rid = escapeSql(roomId);
-  const cid = escapeSql(clientId);
-  const sql = `BEGIN;
--- If leaving is client2, just null client2 and mark pending
-UPDATE rooms SET client2=NULL, status=0 WHERE roomid=${rid} AND client2=${cid};
--- If leaving is client1, promote client2 to client1 when present
-UPDATE rooms SET client1=client2, client2=NULL, status=0 WHERE roomid=${rid} AND client1=${cid} AND client2 IS NOT NULL;
--- If after updates both clients are NULL (room empty), delete the room
-DELETE FROM rooms WHERE roomid=${rid} AND (client1 IS NULL OR client1='') AND client2 IS NULL;
-COMMIT;`;
-  try { await runSql(sql); } catch (e) { /* ignore */ }
-}
-
-async function deleteRoom(roomId) {
-  const rid = escapeSql(roomId);
-  const sql = `DELETE FROM rooms WHERE roomid=${rid};`;
-  try { await runSql(sql); } catch (e) { /* ignore */ }
-}
-
 module.exports = {
   createDbClient() {
-    async function createRoom({ roomid, exp, client1 }) {
-      const rid = escapeSql(roomid);
+    // Create a pending join record
+    async function createPending({ joinid, exp, client1 }) {
+      const jid = escapeSql(joinid);
       const expv = escapeSql(exp);
       const c1 = escapeSql(client1);
-      const sql = `BEGIN;
-INSERT INTO rooms(roomid, exp, client1, client2, status) VALUES (${rid}, ${expv}, ${c1}, NULL, 0);
-COMMIT;`;
+      const sql = `BEGIN;\nINSERT INTO pendings(joinid, client1, exp, client2) VALUES (${jid}, ${c1}, ${expv}, NULL);\nCOMMIT;`;
       await runSql(sql);
-  const [row] = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
-  return normalizeRoom(row);
+      return { joinid, client1, exp, client2: null };
     }
 
-    async function acceptRoom({ roomid, client2 }) {
-      const rid = escapeSql(roomid);
+    // Accept a pending join and create a room
+    async function acceptPendingToRoom({ joinid, client2, roomid }) {
+      const jid = escapeSql(joinid);
       const c2 = escapeSql(client2);
-      const sql = `BEGIN;
-UPDATE rooms SET client2=${c2}, status=1 WHERE roomid=${rid} AND status=0 AND exp > CURRENT_TIMESTAMP;
-SELECT changes() AS changes;
-COMMIT;`;
-      const rows = await runQuery(sql);
-      const changes = rows?.[0]?.changes ? parseInt(rows[0].changes, 10) : 0;
-      if (Number.isNaN(changes)) return 0;
-      return changes;
+      const rid = escapeSql(roomid);
+      // Atomic: insert room if pending exists and not expired; then set client2 on pending.
+      const rows = await runQuery(`BEGIN;
+INSERT OR IGNORE INTO rooms(roomid, client1, client2)
+SELECT ${rid}, p.client1, ${c2}
+FROM pendings p
+WHERE p.joinid=${jid} AND p.exp > CURRENT_TIMESTAMP AND (p.client2 IS NULL OR p.client2='');
+UPDATE pendings SET client2=${c2} WHERE joinid=${jid} AND exp > CURRENT_TIMESTAMP;
+SELECT (SELECT COUNT(*) FROM rooms WHERE roomid=${rid}) AS created, (SELECT client1 FROM rooms WHERE roomid=${rid}) AS client1;
+COMMIT;`);
+      const res = rows?.[0];
+      const created = res?.created ? parseInt(res.created, 10) : 0;
+      if (!created) return { ok: false, code: 404 };
+      return { ok: true, roomid, client1: res.client1 };
     }
 
-    async function getRoom(roomid) {
+    // Check pending status for client1
+    async function checkPending({ joinid, client1 }) {
+      const jid = escapeSql(joinid);
+      const c1 = escapeSql(client1);
+      const rows = await runQuery(`SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND exp > CURRENT_TIMESTAMP LIMIT 1;`);
+      const row = rows?.[0];
+      if (!row) return { status: 'not_found' };
+      if (!row.client2) return { status: 'pending' };
+      // lookup room by the two clients (there should be one)
+      const roomRows = await runQuery(`SELECT roomid FROM rooms WHERE client1=${c1} AND client2=${escapeSql(row.client2)} LIMIT 1;`);
+      const r = roomRows?.[0];
+      if (!r) return { status: 'pending' };
+      return { status: 'ready', roomid: r.roomid };
+    }
+
+    async function getRoomById(roomid) {
       const rid = escapeSql(roomid);
-  const rows = await runQuery(`SELECT roomid, exp, client1, client2, status FROM rooms WHERE roomid=${rid} LIMIT 1;`);
-  return normalizeRoom(rows[0]);
+      const rows = await runQuery(`SELECT roomid, client1, client2 FROM rooms WHERE roomid=${rid} LIMIT 1;`);
+      return rows?.[0] || null;
+    }
+
+    async function deleteRoom(roomid) {
+      const rid = escapeSql(roomid);
+      await runSql(`DELETE FROM rooms WHERE roomid=${rid};`);
     }
 
     async function cleanupExpired() {
-      const rows = await runQuery(`BEGIN; DELETE FROM rooms WHERE status=0 AND exp <= CURRENT_TIMESTAMP; SELECT changes() AS deleted; COMMIT;`);
+      // Remove expired pendings
+      const rows = await runQuery(`BEGIN; DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP; SELECT changes() AS deleted; COMMIT;`);
       const deleted = rows?.[0]?.deleted ? parseInt(rows[0].deleted, 10) : 0;
       return Number.isNaN(deleted) ? 0 : deleted;
     }
 
-    return { onJoin, onLeave, deleteRoom, createRoom, acceptRoom, getRoom, cleanupExpired };
+    return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, cleanupExpired };
   }
 };
