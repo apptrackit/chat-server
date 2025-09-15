@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+  "start": "node index.js",
+  "dev": "nodemon index.js",
+  "db:init": "mkdir -p data && DB_PATH=\"${SQLITE_DB_PATH:-./data/chat.db}\"; sqlite3 \"$DB_PATH\" < scripts/init-db.sql && echo Initialized DB at $DB_PATH"
   },
   "repository": {
     "type": "git",
