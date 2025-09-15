@@ -102,10 +102,12 @@ if (USE_DB && dbHooks) {
       log.info('HTTP POST /api/rooms/check', { joinid, client1_len: client1?.length });
       const missing = required(req.body, ['joinid', 'client1']);
       if (missing) return res.status(400).json({ error: `missing_${missing}` });
-      const status = await dbHooks.checkPending({ joinid, client1 });
-      if (status.status === 'not_found') return res.status(404).json({ error: 'not_found_or_expired' });
-      if (status.status === 'pending') return res.status(204).send();
-      return res.status(200).json({ roomid: status.roomid });
+  const status = await dbHooks.checkPending({ joinid, client1 });
+  if (status.status === 'not_found') return res.status(404).json({ error: 'not_found_or_expired' });
+  if (status.status === 'pending') return res.status(204).send();
+  // status.ready -> clean up pending row now that client1 has roomid
+  try { await dbHooks.deletePending(joinid, client1); } catch (_) { /* non-fatal */ }
+  return res.status(200).json({ roomid: status.roomid });
     } catch (e) {
       log.error('Check room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'check_failed' });

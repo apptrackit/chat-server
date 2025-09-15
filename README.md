@@ -50,7 +50,7 @@ Content-Type: application/json
 3) Check if accepted (client1 polling)
 - POST /api/rooms/check
 - Body: { joinid: string, client1: string }
-- Success: 200 { roomid: string }
+- Success: 200 { roomid: string } and the pending row is deleted server-side
 - Pending: 204 No Content
 - Errors: 400 (missing), 404 { error: "not_found_or_expired" }, 500
 

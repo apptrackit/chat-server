@@ -135,6 +135,14 @@ COMMIT;`);
       await runSql(`DELETE FROM rooms WHERE roomid=${rid};`);
     }
 
+    async function deletePending(joinid, client1) {
+      const jid = escapeSql(joinid);
+      const c1 = escapeSql(client1);
+      const rows = await runQuery(`BEGIN; DELETE FROM pendings WHERE joinid=${jid} AND client1=${c1}; SELECT changes() AS deleted; COMMIT;`);
+      const deleted = rows?.[0]?.deleted ? parseInt(rows[0].deleted, 10) : 0;
+      return Number.isNaN(deleted) ? 0 : deleted;
+    }
+
     async function cleanupExpired() {
       // Remove expired pendings
       const rows = await runQuery(`BEGIN; DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP; SELECT changes() AS deleted; COMMIT;`);
@@ -142,6 +150,6 @@ COMMIT;`);
       return Number.isNaN(deleted) ? 0 : deleted;
     }
 
-    return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, cleanupExpired };
+  return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, deletePending, cleanupExpired };
   }
 };
