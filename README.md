@@ -65,6 +65,12 @@ Content-Type: application/json
 - Success: 200
 - Errors: 400 (missing roomid), 500
 
+6) Purge all data for a device
+- POST /api/user/purge
+- Body: { deviceId: string }
+- Success: 200 { ok: true, roomsDeleted: number, pendingsDeleted: number }
+- Errors: 400 (missing deviceId), 500
+
 Notes
 - Use proper UTC timestamps like "2030-01-01T00:00:00Z" for exp.
 - All errors use appropriate HTTP status codes as above.
