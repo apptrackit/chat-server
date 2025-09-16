@@ -150,6 +150,18 @@ COMMIT;`);
       return Number.isNaN(deleted) ? 0 : deleted;
     }
 
-  return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, deletePending, cleanupExpired };
+    // Purge all rows related to a deviceId from rooms and pendings
+    async function purgeByDevice(deviceId) {
+      const did = escapeSql(deviceId);
+      // Delete from rooms and get count
+      const roomRows = await runQuery(`BEGIN; DELETE FROM rooms WHERE client1=${did} OR client2=${did}; SELECT changes() AS deleted; COMMIT;`);
+      const roomsDeleted = roomRows?.[0]?.deleted ? parseInt(roomRows[0].deleted, 10) : 0;
+      // Delete from pendings and get count
+      const pendingRows = await runQuery(`BEGIN; DELETE FROM pendings WHERE client1=${did} OR client2=${did}; SELECT changes() AS deleted; COMMIT;`);
+      const pendingsDeleted = pendingRows?.[0]?.deleted ? parseInt(pendingRows[0].deleted, 10) : 0;
+      return { roomsDeleted: Number.isNaN(roomsDeleted) ? 0 : roomsDeleted, pendingsDeleted: Number.isNaN(pendingsDeleted) ? 0 : pendingsDeleted };
+    }
+
+  return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, deletePending, cleanupExpired, purgeByDevice };
   }
 };

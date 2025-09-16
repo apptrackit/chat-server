@@ -60,6 +60,21 @@ function required(body, fields) {
 }
 
 if (USE_DB && dbHooks) {
+  // Purge all data for a deviceId (rooms + pendings)
+  app.post('/api/user/purge', async (req, res) => {
+    try {
+      const { deviceId } = req.body || {};
+      log.info('HTTP POST /api/user/purge', { deviceId_len: deviceId?.length });
+      const missing = required(req.body, ['deviceId']);
+      if (missing) return res.status(400).json({ error: `missing_${missing}` });
+      const { roomsDeleted, pendingsDeleted } = await dbHooks.purgeByDevice(deviceId);
+      return res.status(200).json({ ok: true, roomsDeleted, pendingsDeleted });
+    } catch (e) {
+      log.error('User purge failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'purge_failed' });
+    }
+  });
+
   // Create pending join (client1)
   app.post('/api/rooms', async (req, res) => {
     try {
