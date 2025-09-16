@@ -43,77 +43,129 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
 app.get('/', (req, res) => {
   log.info('Health check from', req.ip);
   res.send('WebRTC P2P Signaling Server Active - Ready for iOS clients');
-
 });
 
-// Helper to present room objects with computed flags
-function presentRoom(room) {
-  if (!room) return null;
-  return { ...room, ready: Number(room.status) === 1 };
+// --- REST: New room lifecycle backed by SQLite ---
+function required(body, fields) {
+  for (const f of fields) if (!body || body[f] == null || body[f] === '') return f;
+  return null;
 }
 
-// --- REST: Room management over SQLite ---
-if (USE_DB) {
-  // Create a new room (client1)
+if (USE_DB && dbHooks) {
+  // Purge all data for a deviceId (rooms + pendings)
+  app.post('/api/user/purge', async (req, res) => {
+    try {
+      const { deviceId } = req.body || {};
+      log.info('HTTP POST /api/user/purge', { deviceId_len: deviceId?.length });
+      const missing = required(req.body, ['deviceId']);
+      if (missing) return res.status(400).json({ error: `missing_${missing}` });
+      const { roomsDeleted, pendingsDeleted } = await dbHooks.purgeByDevice(deviceId);
+      return res.status(200).json({ ok: true, roomsDeleted, pendingsDeleted });
+    } catch (e) {
+      log.error('User purge failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'purge_failed' });
+    }
+  });
+
+  // Create pending join (client1)
   app.post('/api/rooms', async (req, res) => {
     try {
-  const { roomid, exp, client1 } = req.body || {};
-  log.info('HTTP POST /api/rooms', { roomid, exp, client1_len: client1?.length });
-      if (!roomid || !exp || !client1) return res.status(400).json({ error: 'roomid, exp, client1 required' });
-  const room = await dbHooks.createRoom({ roomid, exp, client1 });
-  log.info('Created room', room);
-  return res.status(201).json(presentRoom(room));
+      const { joinid, exp, client1 } = req.body || {};
+      log.info('HTTP POST /api/rooms', { joinid, exp, client1_len: client1?.length });
+      const missing = required(req.body, ['joinid', 'exp', 'client1']);
+      if (missing) return res.status(400).json({ error: `missing_${missing}` });
+      await dbHooks.createPending({ joinid, exp, client1 });
+      return res.status(201).json({ ok: true });
     } catch (e) {
-  log.error('Create room failed:', e.message, e.stack);
+      log.error('Create pending failed:', e.message, e.stack);
       return res.status(500).json({ error: 'create_failed' });
     }
   });
 
-  // Accept a room (client2 joins) - roomid must be in body
+  // Accept by client2 -> create a room
   app.post('/api/rooms/accept', async (req, res) => {
     try {
-  const { roomid, client2 } = req.body || {};
-  log.info('HTTP POST /api/rooms/accept', { roomid, client2_len: client2?.length });
-      if (!roomid || !client2) return res.status(400).json({ error: 'roomid, client2 required' });
-      const changed = await dbHooks.acceptRoom({ roomid, client2 });
-      if (changed === 0) return res.status(409).json({ error: 'not_acceptable_or_expired' });
-  const room = await dbHooks.getRoom(roomid);
-  log.info('Accepted room', room);
-  return res.json(presentRoom(room));
+      const { joinid, client2 } = req.body || {};
+      log.info('HTTP POST /api/rooms/accept', { joinid, client2_len: client2?.length });
+      const missing = required(req.body, ['joinid', 'client2']);
+      if (missing) return res.status(400).json({ error: `missing_${missing}` });
+      const roomid = crypto.createHash('sha256').update(`${joinid}:${client2}:${crypto.randomUUID()}`).digest('hex').slice(0, 48);
+      const result = await dbHooks.acceptPendingToRoom({ joinid, client2, roomid });
+      if (!result.ok) {
+        const code = result.code === 404 ? 404 : 409;
+        return res.status(code).json({ error: result.code === 404 ? 'not_found_or_expired' : 'conflict' });
+      }
+      return res.status(200).json({ roomid });
     } catch (e) {
-  log.error('Accept room failed:', e.message, e.stack);
+      log.error('Accept room failed:', e.message, e.stack);
       return res.status(500).json({ error: 'accept_failed' });
     }
   });
 
-  // Get room state - roomid must be in body (POST)
-  app.post('/api/rooms/get', async (req, res) => {
+  // Client1 check if accepted
+  app.post('/api/rooms/check', async (req, res) => {
     try {
-  const { roomid } = req.body || {};
-  log.info('HTTP POST /api/rooms/get', { roomid });
-      if (!roomid) return res.status(400).json({ error: 'roomid required' });
-      const room = await dbHooks.getRoom(roomid);
-      if (!room) return res.status(404).json({ error: 'not_found' });
-  log.info('Fetched room', room);
-  return res.json(presentRoom(room));
+      const { joinid, client1 } = req.body || {};
+      log.info('HTTP POST /api/rooms/check', { joinid, client1_len: client1?.length });
+      const missing = required(req.body, ['joinid', 'client1']);
+      if (missing) return res.status(400).json({ error: `missing_${missing}` });
+  const status = await dbHooks.checkPending({ joinid, client1 });
+  if (status.status === 'not_found') return res.status(404).json({ error: 'not_found_or_expired' });
+  if (status.status === 'pending') return res.status(204).send();
+  // status.ready -> clean up pending row now that client1 has roomid
+  try { await dbHooks.deletePending(joinid, client1); } catch (_) { /* non-fatal */ }
+  return res.status(200).json({ roomid: status.roomid });
     } catch (e) {
-  log.error('Get room failed:', e.message, e.stack);
-      return res.status(500).json({ error: 'get_failed' });
+      log.error('Check room failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'check_failed' });
     }
   });
 
-  // Legacy routes return 410 Gone to steer clients to use body-based endpoints
-  app.post('/api/rooms/:roomid/accept', (req, res) => res.status(410).json({ error: 'use_body_endpoint', endpoint: '/api/rooms/accept' }));
-  app.get('/api/rooms/:roomid', (req, res) => res.status(410).json({ error: 'use_body_endpoint', endpoint: '/api/rooms/get' }));
+  // Delete a room
+  app.delete('/api/rooms', async (req, res) => {
+    try {
+      const { roomid } = req.body || {};
+      log.info('HTTP DELETE /api/rooms', { roomid });
+      const missing = required(req.body, ['roomid']);
+      if (missing) return res.status(400).json({ error: `missing_${missing}` });
+      // idempotent delete
+      await dbHooks.deleteRoom(roomid);
+      return res.sendStatus(200);
+    } catch (e) {
+      log.error('Delete room failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'delete_failed' });
+    }
+  });
+
+  // Get room by id
+  app.get('/api/rooms', async (req, res) => {
+    try {
+      const roomid = req.query.roomid || req.body?.roomid; // allow either for convenience
+      log.info('HTTP GET /api/rooms', { roomid });
+      if (!roomid) return res.status(400).json({ error: 'missing_roomid' });
+      const room = await dbHooks.getRoomById(roomid);
+      if (!room) return res.sendStatus(404);
+      return res.status(200).json(room);
+    } catch (e) {
+      log.error('Get room failed:', e.message, e.stack);
+      return res.status(500).json({ error: 'get_failed' });
+    }
+  });
 }
 
-// Get room info endpoint
+// Legacy endpoints from previous iteration -> 410 to steer away
+app.post('/api/rooms/:roomid/accept', (req, res) => res.status(410).json({ error: 'use_new_endpoints' }));
+app.get('/api/rooms/:roomid', (req, res) => res.status(410).json({ error: 'use_new_endpoints' }));
+
+// Get room info endpoint for in-memory WS rooms
 app.get('/rooms', (req, res) => {
   const roomInfo = Array.from(rooms.entries()).map(([roomId, clients]) => ({
     roomId,
@@ -198,7 +250,6 @@ wss.on('connection', (ws, req) => {
 
       case 'ping': {
         ws.send(JSON.stringify({ type: 'pong' }));
-
         break;
       }
 
@@ -262,7 +313,7 @@ function handleJoinRoom(clientId, message, client, ws) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, new Set());
     log.info(`Created room: ${roomId}`);
-  // DB will be updated on join below
+    // DB not used for WS rooms
   }
 
   const room = rooms.get(roomId);
@@ -272,11 +323,8 @@ function handleJoinRoom(clientId, message, client, ws) {
   client.roomId = roomId;
   client.isInitiator = isFirstUser;
 
-  // no-op DB hook
-
   const userCount = room.size;
   log.info(`Client ${clientId} joined room ${roomId} (${userCount}/2 users) - ${isFirstUser ? 'Initiator' : 'Receiver'}`);
-  if (dbHooks) dbHooks.onJoin(roomId, clientId, isFirstUser);
 
   // Notify client of successful join
   ws.send(JSON.stringify({ 
@@ -294,7 +342,7 @@ function handleJoinRoom(clientId, message, client, ws) {
     const roomClients = Array.from(room);
     roomClients.forEach((id, index) => {
       const client = clients.get(id);
-    if (client && client.ws.readyState === WS_OPEN) { // OPEN
+      if (client && client.ws.readyState === WS_OPEN) { // OPEN
         client.ws.send(JSON.stringify({
           type: 'room_ready',
           roomId: roomId,
@@ -305,7 +353,6 @@ function handleJoinRoom(clientId, message, client, ws) {
       }
     });
     log.info(`Room ${roomId} is ready - starting WebRTC signaling`);
-  // no-op DB hook
   }
 }
 
@@ -363,7 +410,6 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
 
   otherClient.ws.send(JSON.stringify(forwardMessage));
   log.info(`Forwarded ${signalType} from ${clientId} to ${otherClientId} in room ${roomId}`);
-  // no-op DB hook
 }
 
 function handleLeaveRoom(clientId, client, ws) {
@@ -390,7 +436,6 @@ function handleLeaveRoom(clientId, client, ws) {
   if (room.size === 0) {
     rooms.delete(roomId);
     log.info(`Deleted empty room: ${roomId}`);
-  if (dbHooks) dbHooks.deleteRoom(roomId);
   }
 
   // Clear client's room association
@@ -400,7 +445,6 @@ function handleLeaveRoom(clientId, client, ws) {
   // Confirm to leaver
   ws.send(JSON.stringify({ type: 'left_room', roomId }));
   log.info(`Client ${clientId} left room ${roomId}`);
-  if (dbHooks) dbHooks.onLeave(roomId, clientId);
 }
 
 function handleClientDisconnect(clientId, code, reason) {
@@ -428,12 +472,10 @@ function handleClientDisconnect(clientId, code, reason) {
     if (room.size === 0) {
       rooms.delete(roomId);
       log.info(`Deleted empty room: ${roomId}`);
-    if (dbHooks) dbHooks.deleteRoom(roomId);
     }
   }
   
   clients.delete(clientId);
-  if (dbHooks && client && client.roomId) dbHooks.onLeave(client.roomId, clientId);
 }
 
 function notifyRoomPeers(roomId, message) {
@@ -470,12 +512,12 @@ setInterval(() => {
   }
 }, 60000); // Every minute
 
-// Periodic cleanup of expired pending rooms
+// Periodic cleanup of expired pendings
 if (USE_DB && dbHooks?.cleanupExpired) {
   setInterval(async () => {
     try {
       const deleted = await dbHooks.cleanupExpired();
-      if (deleted > 0) log.info(`Cleaned up ${deleted} expired pending rooms`);
+      if (deleted > 0) log.info(`Cleaned up ${deleted} expired pendings`);
     } catch (e) {
       log.warn('Expired cleanup failed:', e.message);
     }
