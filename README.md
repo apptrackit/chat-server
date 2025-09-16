@@ -1,143 +1,145 @@
-# WebRTC Signaling + TURN Backend (Deep Guide)
+# WebRTC Signaling + TURN Backend
 
-This backend provides a minimal, production-friendly WebRTC signaling service with optional TURN relay, suitable for mobile and web peers. It handles room join/leave, WebRTC offer/answer exchange, and ICE candidate forwarding. A separate TURN server enables P2P across restrictive NATs and different networks.
+This backend offers WebRTC signaling via WebSockets and a small REST API backed by SQLite to coordinate pairing using short join codes. Media flows peer-to-peer; the server just forwards signaling messages. A separate TURN server can relay media if direct connectivity fails.
 
-Contents
-- Architecture overview
-- Components and responsibilities
-- Message types and schemas
-- Room lifecycle and step-by-step flows
-- How it works (rooms API)
-- Deployment (Docker Compose, environment)
-- Reverse proxy for WSS
-- TURN: purpose, config, and ports
-- Security recommendations
-- Troubleshooting and verification
+Quick links
+- New DB schema (pendings + rooms)
+- New REST API: create, accept, check, get, delete
+- WebSocket message types
+- Local dev and Docker
+- TURN and reverse proxy notes
 
 ---
 
-## Architecture Overview
+## New Database Architecture
 
-Two cooperating services:
-- Signaling server (Node.js + WebSocket): Establishes rendezvous between two peers in a room and forwards signaling messages (SDP and ICE). No media flows through it.
-- TURN server (coturn): Relays media/data when direct P2P paths fail due to NAT/firewall. Only used if needed by ICE negotiation.
+We split pairing into two stages:
+- pendings: created by client1 with a short join code (joinid), an expiration timestamp (exp, ISO-8601 UTC), and client1 id. client2 is empty until accepted.
+- rooms: created when client2 accepts. Contains the final roomid and both client ids.
 
-High level flow:
-1) Each client opens a secure WebSocket (WSS) to signaling and joins a room (by string ID).
-2) When two clients are present, signaling marks the room ready and designates one as initiator.
-3) Initiator creates SDP offer → signaling forwards to receiver → receiver replies with SDP answer.
-4) Both sides exchange ICE candidates via signaling until a viable path is found (host, srflx, or relay).
-5) Data/media flows directly peer-to-peer; signaling is only used for control messages.
+Schema (`scripts/init-db.sql`)
+- pendings: joinid (PK, TEXT NOT NULL), client1 (TEXT NOT NULL), exp (DATETIME NOT NULL, UTC ISO-8601), client2 (TEXT NULL)
+- rooms: roomid (PK, TEXT NOT NULL), client1 (TEXT NOT NULL), client2 (TEXT NOT NULL)
 
----
+Indices
+- pendings: by client1, by exp
+- rooms: by client1, by client2
 
-## Components and Responsibilities
-
-Signaling server (`index.js`)
-- WebSocket handling: connection, message parsing, safe forwarding.
-- Room registry: Map of `roomId -> Set<clientId>`.
-- Client registry: Map of `clientId -> { ws, roomId, isInitiator }`.
-- Business rules: max two peers per room; initiator assignment; cleanup on leave/disconnect; informative logs.
-
-TURN server (`turn-server/turnserver.conf`)
-- Provides STUN/TURN services. With credentials, clients can allocate relay candidates.
-- Required ports must be accessible; see TURN section below.
-
-Docker Compose (`docker-compose.yml`)
-- Runs both services locally or on a host. Mounts the signaling code; starts coturn with provided config.
-
-Public folder (`public/`)
-- Static assets if needed (not required for mobile clients).
+Expiration
+- A periodic task deletes expired records from pendings (exp <= CURRENT_TIMESTAMP).
 
 ---
 
-## Message Types and Schemas
+## REST API (HTTP)
 
-Inbound from client → signaling:
-- join_room: `{ type: "join_room", roomId: string }`
-- leave_room: `{ type: "leave_room" }`
-- webrtc_offer: `{ type: "webrtc_offer", sdp: string }`
-- webrtc_answer: `{ type: "webrtc_answer", sdp: string }`
-- ice_candidate: `{ type: "ice_candidate", candidate: { candidate: string, sdpMLineIndex: number, sdpMid: string } }`
-- ping: `{ type: "ping" }`
+Base URL: http://host:PORT
+Content-Type: application/json
 
-Outbound from signaling → client:
-- connected: `{ type: "connected", clientId: string, server: string }`
-- room_joined: `{ type: "room_joined", roomId: string, userCount: 1|2, isInitiator: boolean, ready: boolean }`
-- room_ready: `{ type: "room_ready", roomId: string, userCount: 2, isInitiator: boolean }`
-- webrtc_offer / webrtc_answer / ice_candidate: forwarded as above plus `{ from: clientId, roomId }`
-- peer_left: `{ type: "peer_left", message: string }`
-- peer_disconnected: `{ type: "peer_disconnected", message: string }`
-- left_room: `{ type: "left_room", roomId: string|null }`
-- room_full: `{ type: "room_full", error: string, roomId: string }`
-- error: `{ type: "error", error: string }`
+1) Create pending (client1)
+- POST /api/rooms
+- Body: { joinid: string, exp: string(ISO-8601 UTC), client1: string }
+- Success: 201 { ok: true }
+- Errors: 400 { error: "missing_field" }, 500
 
-Notes:
-- Signaling does not inspect SDP contents; it carries opaque strings.
-- ICE candidate messages must include the raw candidate line and indexes.
+2) Accept with code (client2 → room created)
+- POST /api/rooms/accept
+- Body: { joinid: string, client2: string }
+- Success: 200 { roomid: string }
+- Errors: 400 (missing fields), 404 { error: "not_found_or_expired" }, 409 { error: "conflict" }, 500
 
----
+3) Check if accepted (client1 polling)
+- POST /api/rooms/check
+- Body: { joinid: string, client1: string }
+- Success: 200 { roomid: string } and the pending row is deleted server-side
+- Pending: 204 No Content
+- Errors: 400 (missing), 404 { error: "not_found_or_expired" }, 500
 
-## Room Lifecycle and Step-by-Step Flows
+4) Get room by id
+- GET /api/rooms?roomid=...
+- Success: 200 { roomid, client1, client2 }
+- Errors: 400 (missing roomid), 404, 500
 
-Room join:
-1) Client A → `join_room(roomId)` → server creates room and marks A as initiator; returns `room_joined` (1/2).
-2) Client B → `join_room(roomId)` → server adds B as receiver; returns `room_joined` (2/2) to B.
-3) Server → both: `room_ready` with `isInitiator` true for the first client (A), false for the second (B).
+5) Delete room (idempotent)
+- DELETE /api/rooms
+- Body: { roomid: string }
+- Success: 200
+- Errors: 400 (missing roomid), 500
 
-Offer/answer exchange:
-4) Initiator (A) creates SDP offer and sends `webrtc_offer` → server forwards to B.
-5) Receiver (B) sets remote offer, creates SDP answer, sends `webrtc_answer` → server forwards to A.
-
-ICE exchange:
-6) Both peers gather ICE candidates and send `ice_candidate` messages → server forwards to the other peer.
-7) When a viable path is found (HOST/SRFLX/RELAY), ICE state becomes Connected/Completed and the data/media channel opens.
-
-Leaving / disconnects:
-8) A client may send `leave_room` → server removes it from the room, notifies peer with `peer_left`, deletes empty rooms, and confirms with `left_room`.
-9) If a connection drops unexpectedly, server calls that `peer_disconnected`; remaining peer gets notified, and room is deleted if empty.
-
-Health and cleanup:
-10) `/` (HTTP) returns a health page and logs the request.
-11) A periodic sweep removes stale client entries if sockets are no longer open.
-
----
-
-## How it works (rooms API)
-
-Simple contract for pairing two devices using a single `rooms` table:
-
-- Create room (client1)
-	- Client1 generates a long `roomid`, picks an ISO8601 `exp` time, and sends its hashed device id as `client1`.
-	- Server stores: `{ roomid, exp, client1, client2: null, status: 0 }`.
-
-- Accept room (client2)
-	- Client2 sends its hashed device id (`client2`) and the `roomid` to accept.
-	- If `status = 0` and `exp > now`, server sets `client2`, `status = 1` and returns the row.
-	- If expired or already accepted, returns a 409.
-
-- Expiration cleanup
-	- Every minute, the server deletes rows with `status = 0 AND exp <= CURRENT_TIMESTAMP`.
-
-Endpoints
-- POST `/api/rooms`
-	- Body: `{ roomid: string(<=32), exp: string(ISO8601), client1: string(<=128) }`
-	- Returns: `201 { roomid, exp, client1, client2, status }`
-
-- POST `/api/rooms/accept`
-	- Body: `{ roomid: string, client2: string(<=128) }`
-	- Success: `200 { roomid, exp, client1, client2, status: 1 }`
-	- Failure: `409 { error: "not_acceptable_or_expired" }`
-
-- POST `/api/rooms/get`
-	- Body: `{ roomid: string }`
-	- Returns: `200 { roomid, exp, client1, client2, status }` or `404` if not found
+6) Purge all data for a device
+- POST /api/user/purge
+- Body: { deviceId: string }
+- Success: 200 { ok: true, roomsDeleted: number, pendingsDeleted: number }
+- Errors: 400 (missing deviceId), 500
 
 Notes
-- Send `exp` as an ISO8601 UTC string, e.g. `2025-09-13T18:00:00Z`.
-- Data is stored in SQLite at `./data/chat.db` (configurable via `SQLITE_DB_PATH`).
-- This API is enabled when `USE_SQLITE=1` is set (enabled by default in Docker Compose).
+- Use proper UTC timestamps like "2030-01-01T00:00:00Z" for exp.
+- All errors use appropriate HTTP status codes as above.
+- API is enabled when USE_SQLITE=1.
 
+Example sequence
+1. client1 → POST /api/rooms { joinid, exp, client1 } → 201
+2. client2 → POST /api/rooms/accept { joinid, client2 } → 200 { roomid }
+3. client1 polls → POST /api/rooms/check { joinid, client1 } → 200 { roomid } once accepted (204 before that)
+
+---
+
+## WebSocket Signaling
+
+Inbound from client → server
+- join_room: { type: "join_room", roomId: string }
+- leave_room: { type: "leave_room" }
+- webrtc_offer: { type: "webrtc_offer", sdp: string }
+- webrtc_answer: { type: "webrtc_answer", sdp: string }
+- ice_candidate: { type: "ice_candidate", candidate: { candidate, sdpMLineIndex, sdpMid } }
+- ping: { type: "ping" }
+
+Outbound from server → client
+- connected, room_joined, room_ready, webrtc_offer, webrtc_answer, ice_candidate, peer_left, peer_disconnected, left_room, room_full, error
+
+Notes
+- WebSocket roomId should be the roomid returned by the REST accept/check phase.
+
+---
+
+## Local Development
+
+Prereqs
+- Node.js 18+ (tested on 22.x)
+- sqlite3 CLI available on PATH
+
+Install and init DB
+```bash
+npm install
+npm run db:init
+```
+
+Run server
+```bash
+USE_SQLITE=1 npm run dev
+```
+
+Environment
+```bash
+PORT=8080
+# optional; defaults to ./data/chat.db
+SQLITE_DB_PATH=./data/chat.db
+```
+
+---
+
+## Docker / Reverse Proxy / TURN
+
+- Docker Compose included to run signaling and coturn.
+- Put a TLS reverse proxy (nginx, Caddy) in front for WSS.
+- Ensure TURN (coturn) ports are open if you need relay: 3478 UDP/TCP, 5349 TCP, plus UDP relay range.
+
+---
+
+## Troubleshooting
+
+- GET / returns a simple health message.
+- GET /rooms shows in-memory WS rooms (for debugging only).
+- If REST calls return 404 on /check, the join code likely expired or was never created.
 ## Deployment (Docker Compose)
 
 Prerequisites
