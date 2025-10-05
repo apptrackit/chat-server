@@ -1,6 +1,16 @@
 # WebRTC Signaling + TURN Backend
 
-This backend offers WebRTC signaling via WebSockets and a small REST API backed by SQLite to coordinate pairing using short join codes. Media flows peer-to-peer; the server just forwards signaling messages. A separate TURN server can relay media if direct connectivity fails.
+This backend offers WebRTC signaling via WebSockets and a small REST API backed by SQLite to coordinate pairing using short join codes. Media flows peer-to-peer; the server just forwards s## Security Recommendations
+
+- Use WSS (TLS) for signaling in production.
+- TURN with long-term credentials; avoid anonymous no-auth in production.
+- Limit TURN to required ports and IPs; monitor logs for abuse.
+- Consider rate limiting join attempts and message sizes on signaling.
+- Don't trust client SDP contents; validate JSON shapes where possible.
+- **Ephemeral Device IDs**: Clients should use unique ephemeral IDs per session for privacy; the purge API supports batch deletion of multiple IDs.
+- **Automatic Cleanup**: Implement automatic expiration of old rooms and pendings to prevent database bloat.
+
+---messages. A separate TURN server can relay media if direct connectivity fails.
 
 Quick links
 - New DB schema (pendings + rooms)
@@ -65,11 +75,16 @@ Content-Type: application/json
 - Success: 200
 - Errors: 400 (missing roomid), 500
 
-6) Purge all data for a device
+6) Purge all data for device(s)
 - POST /api/user/purge
-- Body: { deviceId: string }
-- Success: 200 { ok: true, roomsDeleted: number, pendingsDeleted: number }
-- Errors: 400 (missing deviceId), 500
+- Body: { deviceIds: string[] } OR { deviceId: string } (legacy)
+- Success: 200 { success: true, deviceIdCount: number, roomsDeleted: number, pendingsDeleted: number }
+- Errors: 400 (missing deviceIds/deviceId, empty array, or invalid IDs), 500
+- Notes:
+  - Preferred format uses `deviceIds` array for batch deletion
+  - Legacy single `deviceId` string format still supported for backward compatibility
+  - Empty arrays are rejected with 400 error
+  - Deletes all rooms and pendings where client1 or client2 matches any provided device ID
 
 Notes
 - Use proper UTC timestamps like "2030-01-01T00:00:00Z" for exp.
@@ -80,6 +95,11 @@ Example sequence
 1. client1 → POST /api/rooms { joinid, exp, client1 } → 201
 2. client2 → POST /api/rooms/accept { joinid, client2 } → 200 { roomid }
 3. client1 polls → POST /api/rooms/check { joinid, client1 } → 200 { roomid } once accepted (204 before that)
+
+Batch purge example
+1. Client has multiple sessions with ephemeral IDs ["id1", "id2", "id3"]
+2. Client → POST /api/user/purge { deviceIds: ["id1", "id2", "id3"] } → 200 { success: true, deviceIdCount: 3, roomsDeleted: 5, pendingsDeleted: 2 }
+3. All rooms and pendings associated with any of those IDs are deleted in a single transaction
 
 ---
 
