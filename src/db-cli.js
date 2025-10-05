@@ -150,16 +150,42 @@ COMMIT;`);
       return Number.isNaN(deleted) ? 0 : deleted;
     }
 
-    // Purge all rows related to a deviceId from rooms and pendings
-    async function purgeByDevice(deviceId) {
-      const did = escapeSql(deviceId);
+    // Purge all rows related to device ID(s) from rooms and pendings
+    // Accepts either a single deviceId string or array of deviceIds
+    async function purgeByDevice(deviceIds) {
+      // Normalize to array
+      const idsArray = Array.isArray(deviceIds) ? deviceIds : [deviceIds];
+      
+      if (idsArray.length === 0) {
+        return { roomsDeleted: 0, pendingsDeleted: 0 };
+      }
+      
+      // Build SQL IN clause: (client1 IN (...) OR client2 IN (...))
+      const escapedIds = idsArray.map(id => escapeSql(id)).join(',');
+      
       // Delete from rooms and get count
-      const roomRows = await runQuery(`BEGIN; DELETE FROM rooms WHERE client1=${did} OR client2=${did}; SELECT changes() AS deleted; COMMIT;`);
+      const roomRows = await runQuery(
+        `BEGIN; ` +
+        `DELETE FROM rooms WHERE client1 IN (${escapedIds}) OR client2 IN (${escapedIds}); ` +
+        `SELECT changes() AS deleted; ` +
+        `COMMIT;`
+      );
       const roomsDeleted = roomRows?.[0]?.deleted ? parseInt(roomRows[0].deleted, 10) : 0;
+      
       // Delete from pendings and get count
-      const pendingRows = await runQuery(`BEGIN; DELETE FROM pendings WHERE client1=${did} OR client2=${did}; SELECT changes() AS deleted; COMMIT;`);
+      const pendingRows = await runQuery(
+        `BEGIN; ` +
+        `DELETE FROM pendings WHERE client1 IN (${escapedIds}) OR client2 IN (${escapedIds}); ` +
+        `SELECT changes() AS deleted; ` +
+        `COMMIT;`
+      );
       const pendingsDeleted = pendingRows?.[0]?.deleted ? parseInt(pendingRows[0].deleted, 10) : 0;
-      return { roomsDeleted: Number.isNaN(roomsDeleted) ? 0 : roomsDeleted, pendingsDeleted: Number.isNaN(pendingsDeleted) ? 0 : pendingsDeleted };
+      
+      return { 
+        roomsDeleted: Number.isNaN(roomsDeleted) ? 0 : roomsDeleted, 
+        pendingsDeleted: Number.isNaN(pendingsDeleted) ? 0 : pendingsDeleted,
+        deviceIdCount: idsArray.length
+      };
     }
 
   return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, deletePending, cleanupExpired, purgeByDevice };

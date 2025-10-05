@@ -60,18 +60,53 @@ function required(body, fields) {
 }
 
 if (USE_DB && dbHooks) {
-  // Purge all data for a deviceId (rooms + pendings)
+  // Purge all data for device ID(s) - supports both array and single ID
   app.post('/api/user/purge', async (req, res) => {
     try {
-      const { deviceId } = req.body || {};
-      log.info('HTTP POST /api/user/purge', { deviceId_len: deviceId?.length });
-      const missing = required(req.body, ['deviceId']);
-      if (missing) return res.status(400).json({ error: `missing_${missing}` });
-      const { roomsDeleted, pendingsDeleted } = await dbHooks.purgeByDevice(deviceId);
-      return res.status(200).json({ ok: true, roomsDeleted, pendingsDeleted });
+      const body = req.body || {};
+      let deviceIds = [];
+      
+      // Support new format (array) - preferred
+      if (body.deviceIds && Array.isArray(body.deviceIds)) {
+        deviceIds = body.deviceIds;
+        log.info('HTTP POST /api/user/purge (batch)', { deviceIds_count: deviceIds.length });
+      }
+      // Support old format (single) - backward compatibility
+      else if (body.deviceId && typeof body.deviceId === 'string') {
+        deviceIds = [body.deviceId];
+        log.info('HTTP POST /api/user/purge (single)', { deviceId_len: body.deviceId.length });
+      }
+      else {
+        return res.status(400).json({ error: 'missing_deviceIds_or_deviceId' });
+      }
+      
+      // Validate array is not empty
+      if (deviceIds.length === 0) {
+        return res.status(400).json({ error: 'empty_deviceIds_array' });
+      }
+      
+      // Validate IDs are non-empty strings
+      const invalidIds = deviceIds.filter(id => !id || typeof id !== 'string' || id.trim().length === 0);
+      if (invalidIds.length > 0) {
+        return res.status(400).json({ error: 'invalid_device_ids', count: invalidIds.length });
+      }
+      
+      const result = await dbHooks.purgeByDevice(deviceIds);
+      log.info('Purge completed', { 
+        deviceIdCount: result.deviceIdCount,
+        roomsDeleted: result.roomsDeleted, 
+        pendingsDeleted: result.pendingsDeleted 
+      });
+      
+      return res.status(200).json({ 
+        success: true, 
+        deviceIdCount: result.deviceIdCount,
+        roomsDeleted: result.roomsDeleted, 
+        pendingsDeleted: result.pendingsDeleted 
+      });
     } catch (e) {
       log.error('User purge failed:', e.message, e.stack);
-      return res.status(500).json({ error: 'purge_failed' });
+      return res.status(500).json({ error: 'purge_failed', details: e.message });
     }
   });
 
