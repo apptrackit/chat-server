@@ -94,15 +94,15 @@ module.exports = {
       const jid = escapeSql(joinid);
       const c2 = escapeSql(client2);
       const rid = escapeSql(roomid);
-      // First delete expired pendings
-      await runSql(`DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;`);
+      // First delete expired pendings (compare as datetime, not string)
+      await runSql(`DELETE FROM pendings WHERE datetime(exp) <= datetime('now');`);
       // Then atomically: insert room if pending exists and not expired; then set client2 on pending.
       const rows = await runQuery(`BEGIN;
 INSERT OR IGNORE INTO rooms(roomid, client1, client2)
 SELECT ${rid}, p.client1, ${c2}
 FROM pendings p
-WHERE p.joinid=${jid} AND p.exp > CURRENT_TIMESTAMP AND (p.client2 IS NULL OR p.client2='');
-UPDATE pendings SET client2=${c2} WHERE joinid=${jid} AND exp > CURRENT_TIMESTAMP;
+WHERE p.joinid=${jid} AND datetime(p.exp) > datetime('now') AND (p.client2 IS NULL OR p.client2='');
+UPDATE pendings SET client2=${c2} WHERE joinid=${jid} AND datetime(exp) > datetime('now');
 SELECT (SELECT COUNT(*) FROM rooms WHERE roomid=${rid}) AS created, (SELECT client1 FROM rooms WHERE roomid=${rid}) AS client1;
 COMMIT;`);
       const res = rows?.[0];
@@ -115,10 +115,10 @@ COMMIT;`);
     async function checkPending({ joinid, client1 }) {
       const jid = escapeSql(joinid);
       const c1 = escapeSql(client1);
-      // First delete expired pendings
-      await runSql(`DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;`);
+      // First delete expired pendings (compare as datetime, not string)
+      await runSql(`DELETE FROM pendings WHERE datetime(exp) <= datetime('now');`);
       // Then query for the specific pending
-      const rows = await runQuery(`SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND exp > CURRENT_TIMESTAMP LIMIT 1;`);
+      const rows = await runQuery(`SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND datetime(exp) > datetime('now') LIMIT 1;`);
       const row = rows?.[0];
       if (!row) return { status: 'not_found' };
       if (!row.client2) return { status: 'pending' };
@@ -149,8 +149,8 @@ COMMIT;`);
     }
 
     async function cleanupExpired() {
-      // Remove expired pendings
-      const rows = await runQuery(`BEGIN; DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP; SELECT changes() AS deleted; COMMIT;`);
+      // Remove expired pendings (compare as datetime, not string)
+      const rows = await runQuery(`BEGIN; DELETE FROM pendings WHERE datetime(exp) <= datetime('now'); SELECT changes() AS deleted; COMMIT;`);
       const deleted = rows?.[0]?.deleted ? parseInt(rows[0].deleted, 10) : 0;
       return Number.isNaN(deleted) ? 0 : deleted;
     }
