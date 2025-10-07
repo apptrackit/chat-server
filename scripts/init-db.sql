@@ -19,6 +19,24 @@ CREATE TABLE IF NOT EXISTS pendings (
 CREATE INDEX IF NOT EXISTS idx_pendings_client1 ON pendings(client1);
 CREATE INDEX IF NOT EXISTS idx_pendings_exp ON pendings(exp);
 
+-- Auto-cleanup expired pendings using a comprehensive trigger strategy
+-- Triggers fire on write operations and aggressively clean expired rows
+-- Use datetime() function to properly compare ISO8601 timestamps
+
+DROP TRIGGER IF EXISTS cleanup_expired_on_insert;
+CREATE TRIGGER cleanup_expired_on_insert
+AFTER INSERT ON pendings
+BEGIN
+  DELETE FROM pendings WHERE datetime(exp) <= datetime('now');
+END;
+
+DROP TRIGGER IF EXISTS cleanup_expired_on_update;  
+CREATE TRIGGER cleanup_expired_on_update
+AFTER UPDATE ON pendings
+BEGIN
+  DELETE FROM pendings WHERE datetime(exp) <= datetime('now');
+END;
+
 -- Established rooms after acceptance
 CREATE TABLE IF NOT EXISTS rooms (
   roomid TEXT NOT NULL PRIMARY KEY,
