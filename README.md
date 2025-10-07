@@ -24,19 +24,22 @@ Quick links
 ## New Database Architecture
 
 We split pairing into two stages:
-- pendings: created by client1 with a short join code (joinid), an expiration timestamp (exp, ISO-8601 UTC), and client1 id. client2 is empty until accepted.
-- rooms: created when client2 accepts. Contains the final roomid and both client ids.
+- **pendings**: created by client1 with a short join code (joinid), an expiration in seconds (expiresInSeconds), and client1 id. client2 is empty until accepted.
+- **rooms**: created when client2 accepts. Contains the final roomid and both client ids.
 
 Schema (`scripts/init-db.sql`)
-- pendings: joinid (PK, TEXT NOT NULL), client1 (TEXT NOT NULL), exp (DATETIME NOT NULL, UTC ISO-8601), client2 (TEXT NULL)
-- rooms: roomid (PK, TEXT NOT NULL), client1 (TEXT NOT NULL), client2 (TEXT NOT NULL)
+- **pendings**: joinid (PK, TEXT NOT NULL), client1 (TEXT NOT NULL), exp (DATETIME NOT NULL, UTC ISO-8601), client2 (TEXT NULL)
+- **rooms**: roomid (PK, TEXT NOT NULL), client1 (TEXT NOT NULL), client2 (TEXT NOT NULL)
 
 Indices
 - pendings: by client1, by exp
 - rooms: by client1, by client2
 
-Expiration
-- A periodic task deletes expired records from pendings (exp <= CURRENT_TIMESTAMP).
+Expiration & Cleanup
+- **Server-side calculation**: Clients send `expiresInSeconds` (duration), server calculates exact `exp` timestamp
+- **Automatic cleanup**: SQL triggers delete expired pendings on INSERT/UPDATE
+- **Atomic operations**: Cleanup happens in same transaction as queries (no race conditions)
+- **Proper datetime comparison**: Uses `datetime()` function for accurate timestamp comparison
 
 ---
 
@@ -45,61 +48,83 @@ Expiration
 Base URL: http://host:PORT
 Content-Type: application/json
 
-1) Create pending (client1)
-- POST /api/rooms
-- Body: { joinid: string, exp: string(ISO-8601 UTC), client1: string }
-- Success: 201 { ok: true }
-- Errors: 400 { error: "missing_field" }, 500
+### 1) Create pending (client1)
+- **POST** `/api/rooms`
+- **Body**: `{ joinid: string, expiresInSeconds: number, client1: string }`
+  - `joinid`: 6-digit join code
+  - `expiresInSeconds`: Duration in seconds (1-86400, max 24 hours)
+  - `client1`: Device UUID (use ephemeral IDs for privacy)
+- **Success**: `201 { ok: true, exp: "2025-10-07T10:00:00.000Z" }`
+  - Server calculates and returns the exact expiry timestamp
+- **Errors**: 
+  - `400 { error: "missing_field" }` - Missing required parameter
+  - `400 { error: "invalid_expiresInSeconds", details: "must be 1-86400 seconds (1 sec to 24 hours)" }`
+  - `500` - Server error
 
-2) Accept with code (client2 → room created)
-- POST /api/rooms/accept
-- Body: { joinid: string, client2: string }
-- Success: 200 { roomid: string }
-- Errors: 400 (missing fields), 404 { error: "not_found_or_expired" }, 409 { error: "conflict" }, 500
+**Common duration values:**
+- 1 minute = `60`
+- 5 minutes = `300`
+- 10 minutes = `600`
+- 1 hour = `3600`
+- 12 hours = `43200`
+- 24 hours = `86400`
 
-3) Check if accepted (client1 polling)
-- POST /api/rooms/check
-- Body: { joinid: string, client1: string }
-- Success: 200 { roomid: string } and the pending row is deleted server-side
-- Pending: 204 No Content
-- Errors: 400 (missing), 404 { error: "not_found_or_expired" }, 500
+### 2) Accept with code (client2 → room created)
+- **POST** `/api/rooms/accept`
+- **Body**: `{ joinid: string, client2: string }`
+- **Success**: `200 { roomid: string }`
+- **Errors**: 
+  - `400` - Missing fields
+  - `404 { error: "not_found_or_expired" }` - Code doesn't exist or expired
+  - `409 { error: "conflict" }` - Code already accepted
+  - `500` - Server error
 
-4) Get room by id
-- GET /api/rooms?roomid=...
-- Success: 200 { roomid, client1, client2 }
-- Errors: 400 (missing roomid), 404, 500
+### 3) Check if accepted (client1 polling)
+- **POST** `/api/rooms/check`
+- **Body**: `{ joinid: string, client1: string }`
+- **Success**: `200 { roomid: string }` - Room created, pending deleted server-side
+- **Pending**: `204 No Content` - Still waiting for client2
+- **Errors**: 
+  - `400` - Missing fields
+  - `404 { error: "not_found_or_expired" }` - Code doesn't exist or expired
+  - `500` - Server error
 
-5) Delete room (idempotent)
-- DELETE /api/rooms
-- Body: { roomid: string }
-- Success: 200
-- Errors: 400 (missing roomid), 500
+### 4) Get room by id
+- **GET** `/api/rooms?roomid=...`
+- **Success**: `200 { roomid, client1, client2 }`
+- **Errors**: `400` (missing roomid), `404`, `500`
 
-6) Purge all data for device(s)
-- POST /api/user/purge
-- Body: { deviceIds: string[] } OR { deviceId: string } (legacy)
-- Success: 200 { success: true, deviceIdCount: number, roomsDeleted: number, pendingsDeleted: number }
-- Errors: 400 (missing deviceIds/deviceId, empty array, or invalid IDs), 500
-- Notes:
+### 5) Delete room (idempotent)
+- **DELETE** `/api/rooms`
+- **Body**: `{ roomid: string }`
+- **Success**: `200`
+- **Errors**: `400` (missing roomid), `500`
+
+### 6) Purge all data for device(s)
+- **POST** `/api/user/purge`
+- **Body**: `{ deviceIds: string[] }` OR `{ deviceId: string }` (legacy)
+- **Success**: `200 { success: true, deviceIdCount: number, roomsDeleted: number, pendingsDeleted: number }`
+- **Errors**: 
+  - `400` - Missing deviceIds/deviceId, empty array, or invalid IDs
+  - `500` - Server error
+- **Notes**:
   - Preferred format uses `deviceIds` array for batch deletion
-  - Legacy single `deviceId` string format still supported for backward compatibility
-  - Empty arrays are rejected with 400 error
+  - Legacy single `deviceId` string format still supported
   - Deletes all rooms and pendings where client1 or client2 matches any provided device ID
 
-Notes
-- Use proper UTC timestamps like "2030-01-01T00:00:00Z" for exp.
-- All errors use appropriate HTTP status codes as above.
-- API is enabled when USE_SQLITE=1.
+---
 
-Example sequence
-1. client1 → POST /api/rooms { joinid, exp, client1 } → 201
-2. client2 → POST /api/rooms/accept { joinid, client2 } → 200 { roomid }
-3. client1 polls → POST /api/rooms/check { joinid, client1 } → 200 { roomid } once accepted (204 before that)
+### Example Sequence
 
-Batch purge example
-1. Client has multiple sessions with ephemeral IDs ["id1", "id2", "id3"]
-2. Client → POST /api/user/purge { deviceIds: ["id1", "id2", "id3"] } → 200 { success: true, deviceIdCount: 3, roomsDeleted: 5, pendingsDeleted: 2 }
-3. All rooms and pendings associated with any of those IDs are deleted in a single transaction
+**Creating and joining a room:**
+1. **Client1** → `POST /api/rooms { joinid: "123456", expiresInSeconds: 300, client1: "device-uuid-1" }` → `201 { ok: true, exp: "2025-10-07T10:05:00.000Z" }`
+2. **Client2** → `POST /api/rooms/accept { joinid: "123456", client2: "device-uuid-2" }` → `200 { roomid: "abc123..." }`
+3. **Client1** polls → `POST /api/rooms/check { joinid: "123456", client1: "device-uuid-1" }` → `200 { roomid: "abc123..." }`
+4. Both clients connect via WebSocket using `roomid`
+
+**Batch purge:**
+1. Client has ephemeral IDs: `["id1", "id2", "id3"]`
+2. Client → `POST /api/user/purge { deviceIds: ["id1", "id2", "id3"] }` → `200 { success: true, deviceIdCount: 3, roomsDeleted: 5, pendingsDeleted: 2 }`
 
 ---
 
