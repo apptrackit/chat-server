@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS pendings (
 CREATE INDEX IF NOT EXISTS idx_pendings_client1 ON pendings(client1);
 CREATE INDEX IF NOT EXISTS idx_pendings_exp ON pendings(exp);
 
+-- Trigger to auto-delete expired pendings on any SELECT
+-- This ensures expired rows are cleaned up lazily without backend load
+DROP TRIGGER IF EXISTS cleanup_expired_pendings;
+CREATE TRIGGER cleanup_expired_pendings
+BEFORE INSERT ON pendings
+BEGIN
+  DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;
+END;
+
 -- Established rooms after acceptance
 CREATE TABLE IF NOT EXISTS rooms (
   roomid TEXT NOT NULL PRIMARY KEY,
