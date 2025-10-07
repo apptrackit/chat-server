@@ -19,11 +19,19 @@ CREATE TABLE IF NOT EXISTS pendings (
 CREATE INDEX IF NOT EXISTS idx_pendings_client1 ON pendings(client1);
 CREATE INDEX IF NOT EXISTS idx_pendings_exp ON pendings(exp);
 
--- Trigger to auto-delete expired pendings on any SELECT
--- This ensures expired rows are cleaned up lazily without backend load
-DROP TRIGGER IF EXISTS cleanup_expired_pendings;
-CREATE TRIGGER cleanup_expired_pendings
-BEFORE INSERT ON pendings
+-- Auto-cleanup expired pendings using a comprehensive trigger strategy
+-- Triggers fire on write operations and aggressively clean expired rows
+
+DROP TRIGGER IF EXISTS cleanup_expired_on_insert;
+CREATE TRIGGER cleanup_expired_on_insert
+AFTER INSERT ON pendings
+BEGIN
+  DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;
+END;
+
+DROP TRIGGER IF EXISTS cleanup_expired_on_update;  
+CREATE TRIGGER cleanup_expired_on_update
+AFTER UPDATE ON pendings
 BEGIN
   DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;
 END;

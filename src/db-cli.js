@@ -94,8 +94,9 @@ module.exports = {
       const jid = escapeSql(joinid);
       const c2 = escapeSql(client2);
       const rid = escapeSql(roomid);
-      // Atomic: insert room if pending exists and not expired; then set client2 on pending.
+      // Atomic: delete expired, then insert room if pending exists and not expired; then set client2 on pending.
       const rows = await runQuery(`BEGIN;
+DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;
 INSERT OR IGNORE INTO rooms(roomid, client1, client2)
 SELECT ${rid}, p.client1, ${c2}
 FROM pendings p
@@ -113,7 +114,11 @@ COMMIT;`);
     async function checkPending({ joinid, client1 }) {
       const jid = escapeSql(joinid);
       const c1 = escapeSql(client1);
-      const rows = await runQuery(`SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND exp > CURRENT_TIMESTAMP LIMIT 1;`);
+      // First delete expired, then query
+      const rows = await runQuery(`BEGIN;
+DELETE FROM pendings WHERE exp <= CURRENT_TIMESTAMP;
+SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND exp > CURRENT_TIMESTAMP LIMIT 1;
+COMMIT;`);
       const row = rows?.[0];
       if (!row) return { status: 'not_found' };
       if (!row.client2) return { status: 'pending' };
