@@ -113,12 +113,23 @@ if (USE_DB && dbHooks) {
   // Create pending join (client1)
   app.post('/api/rooms', async (req, res) => {
     try {
-      const { joinid, exp, client1 } = req.body || {};
-      log.info('HTTP POST /api/rooms', { joinid, exp, client1_len: client1?.length });
-      const missing = required(req.body, ['joinid', 'exp', 'client1']);
+      const { joinid, client1, expiresInSeconds } = req.body || {};
+      log.info('HTTP POST /api/rooms', { joinid, expiresInSeconds, client1_len: client1?.length });
+      const missing = required(req.body, ['joinid', 'client1', 'expiresInSeconds']);
       if (missing) return res.status(400).json({ error: `missing_${missing}` });
-      await dbHooks.createPending({ joinid, exp, client1 });
-      return res.status(201).json({ ok: true });
+      
+      // Validate expiresInSeconds
+      const seconds = parseInt(expiresInSeconds, 10);
+      if (isNaN(seconds) || seconds < 1 || seconds > 86400) {
+        return res.status(400).json({ error: 'invalid_expiresInSeconds', details: 'must be 1-86400 seconds (1 sec to 24 hours)' });
+      }
+      
+      // Calculate expiry date on server side (UTC)
+      const expiryDate = new Date(Date.now() + seconds * 1000).toISOString();
+      log.info('Server-calculated expiry:', { expiresInSeconds: seconds, expiryDate });
+      
+      await dbHooks.createPending({ joinid, exp: expiryDate, client1 });
+      return res.status(201).json({ ok: true, exp: expiryDate });
     } catch (e) {
       log.error('Create pending failed:', e.message, e.stack);
       return res.status(500).json({ error: 'create_failed' });
