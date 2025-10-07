@@ -94,10 +94,10 @@ module.exports = {
       const jid = escapeSql(joinid);
       const c2 = escapeSql(client2);
       const rid = escapeSql(roomid);
-      // First delete expired pendings (compare as datetime, not string)
-      await runSql(`DELETE FROM pendings WHERE datetime(exp) <= datetime('now');`);
-      // Then atomically: insert room if pending exists and not expired; then set client2 on pending.
+      // Do everything in ONE atomic transaction to avoid race conditions
+      // Delete expired first, then insert room, all using the same datetime('now') evaluation
       const rows = await runQuery(`BEGIN;
+DELETE FROM pendings WHERE datetime(exp) <= datetime('now');
 INSERT OR IGNORE INTO rooms(roomid, client1, client2)
 SELECT ${rid}, p.client1, ${c2}
 FROM pendings p
@@ -115,10 +115,11 @@ COMMIT;`);
     async function checkPending({ joinid, client1 }) {
       const jid = escapeSql(joinid);
       const c1 = escapeSql(client1);
-      // First delete expired pendings (compare as datetime, not string)
-      await runSql(`DELETE FROM pendings WHERE datetime(exp) <= datetime('now');`);
-      // Then query for the specific pending
-      const rows = await runQuery(`SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND datetime(exp) > datetime('now') LIMIT 1;`);
+      // Do cleanup and query in ONE transaction to use same datetime('now')
+      const rows = await runQuery(`BEGIN;
+DELETE FROM pendings WHERE datetime(exp) <= datetime('now');
+SELECT joinid, client1, client2 FROM pendings WHERE joinid=${jid} AND client1=${c1} AND datetime(exp) > datetime('now') LIMIT 1;
+COMMIT;`);
       const row = rows?.[0];
       if (!row) return { status: 'not_found' };
       if (!row.client2) return { status: 'pending' };
