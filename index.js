@@ -300,6 +300,13 @@ wss.on('connection', (ws, req) => {
       case 'key_exchange':
       case 'key_exchange_complete': {
         // E2EE: Relay encryption key exchange messages (server never stores keys)
+        log.debug(`Key exchange message received:`, {
+          type: parsedMessage.type,
+          hasPublicKey: !!parsedMessage.publicKey,
+          hasSessionId: !!parsedMessage.sessionId,
+          publicKeyLength: parsedMessage.publicKey?.length,
+          sessionId: parsedMessage.sessionId?.substring(0, 8)
+        });
         handleWebRTCSignaling(clientId, parsedMessage, client, 'encryption');
         break;
       }
@@ -462,6 +469,18 @@ function handleWebRTCSignaling(clientId, message, client, signalType) {
     forwardMessage.sdp = message.sdp;
   } else if (signalType === 'ice') {
     forwardMessage.candidate = message.candidate;
+  } else if (signalType === 'encryption') {
+    // E2EE: Forward all encryption-specific fields
+    if (message.publicKey) forwardMessage.publicKey = message.publicKey;
+    if (message.sessionId) forwardMessage.sessionId = message.sessionId;
+    if (message.timestamp) forwardMessage.timestamp = message.timestamp;
+    
+    log.debug(`Forwarding encryption message with fields:`, {
+      hasPublicKey: !!forwardMessage.publicKey,
+      hasSessionId: !!forwardMessage.sessionId,
+      publicKeyLength: forwardMessage.publicKey?.length,
+      keys: Object.keys(forwardMessage)
+    });
   }
 
   otherClient.ws.send(JSON.stringify(forwardMessage));
