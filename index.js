@@ -297,6 +297,13 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      case 'key_exchange':
+      case 'key_exchange_complete': {
+        // E2EE: Relay encryption key exchange messages (server never stores keys)
+        handleWebRTCSignaling(clientId, parsedMessage, client, 'encryption');
+        break;
+      }
+
       case 'ping': {
         ws.send(JSON.stringify({ type: 'pong' }));
         break;
