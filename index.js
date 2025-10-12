@@ -1,9 +1,13 @@
 // WebRTC P2P Signaling Server
 // Purpose: Room-based signaling for WebRTC peers (mobile/web). Handles join/leave, offer/answer, and ICE.
 
+require('dotenv').config(); // Load environment variables first
+
 const express = require('express');
 const { Server } = require('ws');
 const crypto = require('crypto');
+const apnsService = require('./src/apns-service'); // APNs for iOS push notifications
+
 const USE_DB = process.env.USE_SQLITE === '1' || process.env.USE_SQLITE === 'true';
 let dbHooks;
 if (USE_DB) {
@@ -113,8 +117,14 @@ if (USE_DB && dbHooks) {
   // Create pending join (client1)
   app.post('/api/rooms', async (req, res) => {
     try {
-      const { joinid, client1, expiresInSeconds } = req.body || {};
-      log.info('HTTP POST /api/rooms', { joinid, expiresInSeconds, client1_len: client1?.length });
+      const { joinid, client1, expiresInSeconds, client1_token, platform } = req.body || {};
+      log.info('HTTP POST /api/rooms', { 
+        joinid, 
+        expiresInSeconds, 
+        client1_len: client1?.length,
+        has_token: !!client1_token,
+        platform: platform || 'unknown'
+      });
       const missing = required(req.body, ['joinid', 'client1', 'expiresInSeconds']);
       if (missing) return res.status(400).json({ error: `missing_${missing}` });
       
@@ -128,7 +138,13 @@ if (USE_DB && dbHooks) {
       const expiryDate = new Date(Date.now() + seconds * 1000).toISOString();
       log.info('Server-calculated expiry:', { expiresInSeconds: seconds, expiryDate });
       
-      await dbHooks.createPending({ joinid, exp: expiryDate, client1 });
+      await dbHooks.createPending({ 
+        joinid, 
+        exp: expiryDate, 
+        client1,
+        client1_token: client1_token || null,
+        platform: platform || null
+      });
       return res.status(201).json({ ok: true, exp: expiryDate });
     } catch (e) {
       log.error('Create pending failed:', e.message, e.stack);
@@ -139,12 +155,23 @@ if (USE_DB && dbHooks) {
   // Accept by client2 -> create a room
   app.post('/api/rooms/accept', async (req, res) => {
     try {
-      const { joinid, client2 } = req.body || {};
-      log.info('HTTP POST /api/rooms/accept', { joinid, client2_len: client2?.length });
+      const { joinid, client2, client2_token, platform } = req.body || {};
+      log.info('HTTP POST /api/rooms/accept', { 
+        joinid, 
+        client2_len: client2?.length,
+        has_token: !!client2_token,
+        platform: platform || 'unknown'
+      });
       const missing = required(req.body, ['joinid', 'client2']);
       if (missing) return res.status(400).json({ error: `missing_${missing}` });
       const roomid = crypto.createHash('sha256').update(`${joinid}:${client2}:${crypto.randomUUID()}`).digest('hex').slice(0, 48);
-      const result = await dbHooks.acceptPendingToRoom({ joinid, client2, roomid });
+      const result = await dbHooks.acceptPendingToRoom({ 
+        joinid, 
+        client2, 
+        roomid,
+        client2_token: client2_token || null,
+        platform: platform || null
+      });
       if (!result.ok) {
         const code = result.code === 404 ? 404 : 409;
         return res.status(code).json({ error: result.code === 404 ? 'not_found_or_expired' : 'conflict' });
@@ -417,6 +444,15 @@ function handleJoinRoom(clientId, message, client, ws) {
     });
     log.info(`Room ${roomId} is ready - starting WebRTC signaling`);
   }
+
+  // ========== PUSH NOTIFICATION LOGIC ==========
+  // If only one user in room, check if peer exists and send push notification
+  if (userCount === 1 && USE_DB && dbHooks) {
+    sendPushNotificationToPeer(roomId, clientId).catch(err => {
+      log.error(`Failed to send push notification for room ${roomId}:`, err.message);
+    });
+  }
+  // =============================================
 }
 
 function handleWebRTCSignaling(clientId, message, client, signalType) {
@@ -520,6 +556,91 @@ function handleLeaveRoom(clientId, client, ws) {
   // Confirm to leaver
   ws.send(JSON.stringify({ type: 'left_room', roomId }));
   log.info(`Client ${clientId} left room ${roomId}`);
+}
+
+/**
+ * Send push notification to the peer user in a room.
+ * Called when one user joins a room and the other is not yet connected via WebSocket.
+ * 
+ * @param {string} roomId - The room ID
+ * @param {string} joinedClientId - The client ID of the user who just joined
+ */
+async function sendPushNotificationToPeer(roomId, joinedClientId) {
+  try {
+    // Fetch room details from database
+    const roomData = await dbHooks.getRoomById(roomId);
+    
+    if (!roomData) {
+      log.warn(`[Push] Room ${roomId} not found in database - cannot send push notification`);
+      return;
+    }
+
+    // Determine which client is the peer (the one NOT currently joined via WebSocket)
+    let peerClientId, peerToken, peerPlatform;
+    
+    if (roomData.client1 !== joinedClientId) {
+      // Peer is client1
+      peerClientId = roomData.client1;
+      peerToken = roomData.client1_token;
+      peerPlatform = roomData.client1_platform;
+    } else if (roomData.client2 !== joinedClientId) {
+      // Peer is client2
+      peerClientId = roomData.client2;
+      peerToken = roomData.client2_token;
+      peerPlatform = roomData.client2_platform;
+    } else {
+      log.warn(`[Push] Could not determine peer for room ${roomId}`);
+      return;
+    }
+
+    // Check if peer has a device token
+    if (!peerToken) {
+      log.debug(`[Push] Peer ${peerClientId} has no device token - skipping push notification`);
+      return;
+    }
+
+    // Check if peer is already connected via WebSocket
+    const peerClient = clients.get(peerClientId);
+    if (peerClient && peerClient.ws.readyState === WS_OPEN) {
+      log.debug(`[Push] Peer ${peerClientId} is already connected via WebSocket - skipping push notification`);
+      return;
+    }
+
+    // Send platform-specific push notification
+    if (peerPlatform === 'ios') {
+      const result = await apnsService.sendPresenceNotification(
+        peerToken,
+        roomId,
+        'Someone is waiting in your chat room'
+      );
+
+      if (result.success) {
+        log.info(`[Push] ✅ Sent iOS notification to peer ${peerClientId} for room ${roomId}`);
+      } else {
+        log.error(`[Push] ❌ Failed to send iOS notification to peer ${peerClientId}:`, result.error);
+        
+        // If token is invalid, remove it from database
+        if (result.shouldPurgeToken) {
+          log.warn(`[Push] Purging invalid token for ${peerClientId} in room ${roomId}`);
+          // Update the database to null out the invalid token
+          if (roomData.client1 === peerClientId && dbHooks.updateRoomToken) {
+            await dbHooks.updateRoomToken(roomId, 'client1', null);
+          } else if (roomData.client2 === peerClientId && dbHooks.updateRoomToken) {
+            await dbHooks.updateRoomToken(roomId, 'client2', null);
+          }
+        }
+      }
+    } else if (peerPlatform === 'android') {
+      // TODO: Implement FCM for Android when needed
+      log.debug(`[Push] Android push notifications not yet implemented for peer ${peerClientId}`);
+    } else {
+      log.warn(`[Push] Unknown platform '${peerPlatform}' for peer ${peerClientId}`);
+    }
+
+  } catch (error) {
+    log.error(`[Push] Error in sendPushNotificationToPeer for room ${roomId}:`, error.message);
+    throw error;
+  }
 }
 
 function handleClientDisconnect(clientId, code, reason) {

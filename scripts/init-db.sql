@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS pendings (
   joinid TEXT NOT NULL PRIMARY KEY,
   client1 TEXT NOT NULL,
   exp DATETIME NOT NULL, -- store as ISO8601 UTC string
-  client2 TEXT
+  client2 TEXT,
+  client1_token TEXT, -- APNs/FCM device token for iOS/Android
+  platform TEXT -- 'ios' or 'android' for cross-platform support
 );
 
 CREATE INDEX IF NOT EXISTS idx_pendings_client1 ON pendings(client1);
@@ -41,7 +43,11 @@ END;
 CREATE TABLE IF NOT EXISTS rooms (
   roomid TEXT NOT NULL PRIMARY KEY,
   client1 TEXT NOT NULL,
-  client2 TEXT NOT NULL
+  client2 TEXT NOT NULL,
+  client1_token TEXT, -- APNs/FCM device token for iOS/Android
+  client2_token TEXT, -- APNs/FCM device token for iOS/Android
+  client1_platform TEXT, -- 'ios' or 'android'
+  client2_platform TEXT -- 'ios' or 'android'
 );
 
 CREATE INDEX IF NOT EXISTS idx_rooms_client1 ON rooms(client1);
