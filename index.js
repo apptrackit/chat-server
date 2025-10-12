@@ -575,21 +575,25 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
       return;
     }
 
-    // Determine which client is the peer (the one NOT currently joined via WebSocket)
+    // Determine which client is the peer (the one NOT currently joining)
+    // IMPORTANT: Only ping the OTHER person, never yourself
     let peerClientId, peerToken, peerPlatform;
     
-    if (roomData.client1 !== joinedClientId) {
-      // Peer is client1
-      peerClientId = roomData.client1;
-      peerToken = roomData.client1_token;
-      peerPlatform = roomData.client1_platform;
-    } else if (roomData.client2 !== joinedClientId) {
-      // Peer is client2
+    if (roomData.client1 === joinedClientId && roomData.client2) {
+      // Joiner is client1, so ping client2
       peerClientId = roomData.client2;
       peerToken = roomData.client2_token;
       peerPlatform = roomData.client2_platform;
+      log.debug(`[Push] Joiner is client1, targeting client2 (${peerClientId?.substring(0, 8)}...)`);
+    } else if (roomData.client2 === joinedClientId && roomData.client1) {
+      // Joiner is client2, so ping client1
+      peerClientId = roomData.client1;
+      peerToken = roomData.client1_token;
+      peerPlatform = roomData.client1_platform;
+      log.debug(`[Push] Joiner is client2, targeting client1 (${peerClientId?.substring(0, 8)}...)`);
     } else {
-      log.warn(`[Push] Could not determine peer for room ${roomId}`);
+      // Either: 1) No peer exists yet (first to join), or 2) joiner not in room
+      log.debug(`[Push] No peer to notify in room ${roomId} (joiner: ${joinedClientId.substring(0, 8)}...)`);
       return;
     }
 
