@@ -80,26 +80,30 @@ function runQuery(sql) {
 module.exports = {
   createDbClient() {
     // Create a pending join record
-    async function createPending({ joinid, exp, client1 }) {
+    async function createPending({ joinid, exp, client1, client1_token = null, platform = null }) {
       const jid = escapeSql(joinid);
       const expv = escapeSql(exp);
       const c1 = escapeSql(client1);
-      const sql = `BEGIN;\nINSERT INTO pendings(joinid, client1, exp, client2) VALUES (${jid}, ${c1}, ${expv}, NULL);\nCOMMIT;`;
+      const token = escapeSql(client1_token);
+      const plat = escapeSql(platform);
+      const sql = `BEGIN;\nINSERT INTO pendings(joinid, client1, exp, client2, client1_token, platform) VALUES (${jid}, ${c1}, ${expv}, NULL, ${token}, ${plat});\nCOMMIT;`;
       await runSql(sql);
-      return { joinid, client1, exp, client2: null };
+      return { joinid, client1, exp, client2: null, client1_token, platform };
     }
 
     // Accept a pending join and create a room
-    async function acceptPendingToRoom({ joinid, client2, roomid }) {
+    async function acceptPendingToRoom({ joinid, client2, roomid, client2_token = null, platform = null }) {
       const jid = escapeSql(joinid);
       const c2 = escapeSql(client2);
       const rid = escapeSql(roomid);
+      const token2 = escapeSql(client2_token);
+      const plat2 = escapeSql(platform);
       // Do everything in ONE atomic transaction to avoid race conditions
-      // Delete expired first, then insert room, all using the same datetime('now') evaluation
+      // Delete expired first, then insert room with tokens, all using the same datetime('now') evaluation
       const rows = await runQuery(`BEGIN;
 DELETE FROM pendings WHERE datetime(exp) <= datetime('now');
-INSERT OR IGNORE INTO rooms(roomid, client1, client2)
-SELECT ${rid}, p.client1, ${c2}
+INSERT OR IGNORE INTO rooms(roomid, client1, client2, client1_token, client2_token, client1_platform, client2_platform)
+SELECT ${rid}, p.client1, ${c2}, p.client1_token, ${token2}, p.platform, ${plat2}
 FROM pendings p
 WHERE p.joinid=${jid} AND datetime(p.exp) > datetime('now') AND (p.client2 IS NULL OR p.client2='');
 UPDATE pendings SET client2=${c2} WHERE joinid=${jid} AND datetime(exp) > datetime('now');
@@ -132,7 +136,7 @@ COMMIT;`);
 
     async function getRoomById(roomid) {
       const rid = escapeSql(roomid);
-      const rows = await runQuery(`SELECT roomid, client1, client2 FROM rooms WHERE roomid=${rid} LIMIT 1;`);
+      const rows = await runQuery(`SELECT roomid, client1, client2, client1_token, client2_token, client1_platform, client2_platform FROM rooms WHERE roomid=${rid} LIMIT 1;`);
       return rows?.[0] || null;
     }
 
@@ -194,6 +198,35 @@ COMMIT;`);
       };
     }
 
-  return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, deletePending, cleanupExpired, purgeByDevice };
+    /**
+     * Update or remove a device token for a specific client in a room.
+     * Used to purge invalid tokens when APNs returns BadDeviceToken.
+     * 
+     * @param {string} roomid - The room ID
+     * @param {string} clientField - Either 'client1' or 'client2'
+     * @param {string|null} newToken - New token value (null to remove)
+     * @returns {Promise<boolean>} - True if updated successfully
+     */
+    async function updateRoomToken(roomid, clientField, newToken) {
+      if (!roomid || (clientField !== 'client1' && clientField !== 'client2')) {
+        throw new Error('Invalid parameters for updateRoomToken');
+      }
+      
+      const rid = escapeSql(roomid);
+      const tokenField = clientField === 'client1' ? 'client1_token' : 'client2_token';
+      const tokenValue = newToken ? escapeSql(newToken) : 'NULL';
+      
+      const rows = await runQuery(
+        `BEGIN; ` +
+        `UPDATE rooms SET ${tokenField}=${tokenValue} WHERE roomid=${rid}; ` +
+        `SELECT changes() AS updated; ` +
+        `COMMIT;`
+      );
+      
+      const updated = rows?.[0]?.updated ? parseInt(rows[0].updated, 10) : 0;
+      return updated > 0;
+    }
+
+  return { createPending, acceptPendingToRoom, checkPending, getRoomById, deleteRoom, deletePending, cleanupExpired, purgeByDevice, updateRoomToken };
   }
 };
