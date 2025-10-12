@@ -366,11 +366,17 @@ function handleJoinRoom(clientId, message, client, ws) {
    * Add client to a room (creating it if needed). First client becomes initiator.
    * Notifies when room is ready (2 users) with initiator flag so only one creates an offer.
    */
-  const { roomId } = message;
+  const { roomId, deviceId } = message;
   
   if (!roomId || typeof roomId !== 'string') {
     ws.send(JSON.stringify({ type: 'error', error: 'Invalid roomId' }));
     return;
+  }
+  
+  // Store the device ID if provided (for push notification matching)
+  if (deviceId && typeof deviceId === 'string') {
+    client.deviceId = deviceId;
+    log.debug(`Client ${clientId} mapped to deviceId: ${deviceId.substring(0, 8)}...`);
   }
 
   // Check if room is full
@@ -448,7 +454,9 @@ function handleJoinRoom(clientId, message, client, ws) {
   // ========== PUSH NOTIFICATION LOGIC ==========
   // If only one user in room, check if peer exists and send push notification
   if (userCount === 1 && USE_DB && dbHooks) {
-    sendPushNotificationToPeer(roomId, clientId).catch(err => {
+    // Use deviceId if available, fall back to clientId
+    const joinerDeviceId = client.deviceId || clientId;
+    sendPushNotificationToPeer(roomId, joinerDeviceId).catch(err => {
       log.error(`Failed to send push notification for room ${roomId}:`, err.message);
     });
   }
