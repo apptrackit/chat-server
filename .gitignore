@@ -3,3 +3,4 @@ node_modules
 *.db
 *.p8keys/
 keys/
+*.p8
