@@ -90,6 +90,9 @@ class APNsService {
       notification.badge = 1;
       notification.topic = this.bundleId; // REQUIRED!
       
+      // Enable mutable-content flag so Notification Service Extension can modify the notification
+      notification.mutableContent = 1;
+      
       // Custom data for deep link (available in app)
       notification.payload = {
         roomId: roomId,
