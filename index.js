@@ -7,6 +7,7 @@ const express = require('express');
 const { Server } = require('ws');
 const crypto = require('crypto');
 const apnsService = require('./src/apns-service'); // APNs for iOS push notifications
+const fcmService = require('./src/fcm-service'); // FCM for Android push notifications
 
 const USE_DB = process.env.USE_SQLITE === '1' || process.env.USE_SQLITE === 'true';
 let dbHooks;
@@ -658,8 +659,28 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
         }
       }
     } else if (peerPlatform === 'android') {
-      // TODO: Implement FCM for Android when needed
-      log.debug(`[Push] Android push notifications not yet implemented for peer ${peerClientId}`);
+      const result = await fcmService.sendPresenceNotification(
+        peerToken,
+        roomId,
+        'Someone is waiting in your chat room'
+      );
+
+      if (result.success) {
+        log.info(`[Push] ✅ Sent Android notification to peer ${peerClientId} for room ${roomId}`);
+      } else {
+        log.error(`[Push] ❌ Failed to send Android notification to peer ${peerClientId}:`, result.error);
+        
+        // If token is invalid, remove it from database
+        if (result.shouldPurgeToken) {
+          log.warn(`[Push] Purging invalid token for ${peerClientId} in room ${roomId}`);
+          // Update the database to null out the invalid token
+          if (roomData.client1 === peerClientId && dbHooks.updateRoomToken) {
+            await dbHooks.updateRoomToken(roomId, 'client1', null);
+          } else if (roomData.client2 === peerClientId && dbHooks.updateRoomToken) {
+            await dbHooks.updateRoomToken(roomId, 'client2', null);
+          }
+        }
+      }
     } else {
       log.warn(`[Push] Unknown platform '${peerPlatform}' for peer ${peerClientId}`);
     }
