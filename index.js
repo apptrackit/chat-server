@@ -343,6 +343,25 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({ type: 'pong' }));
         break;
       }
+      
+      case 'ping_peer': {
+        // Manual ping request from user - trigger push notification to peer
+        const roomId = client.roomId;
+        if (!roomId) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Not in a room' }));
+          break;
+        }
+        
+        const deviceId = client.deviceId || clientId;
+        log.info(`[Ping] Manual ping request from ${deviceId.substring(0, 8)}... in room ${roomId}`);
+        
+        sendPushNotificationToPeer(roomId, deviceId).catch(err => {
+          log.error(`[Ping] Failed to send manual ping for room ${roomId}:`, err.message);
+        });
+        
+        ws.send(JSON.stringify({ type: 'ping_sent' }));
+        break;
+      }
 
       default:
         log.warn(`Unknown message type from ${clientId}: ${parsedMessage.type}`);
