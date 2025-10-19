@@ -260,10 +260,12 @@ const server = app.listen(PORT, () => {
 const wss = new Server({ server });
 
 // Store connected clients and rooms
-// clients: clientId -> { ws, roomId, isInitiator }
+// clients: clientId -> { ws, roomId, isInitiator, deviceId }
 // rooms:   roomId   -> Set<clientId>
+// deviceToClient: deviceId -> clientId (for checking if a device is connected)
 const clients = new Map();
 const rooms = new Map();
+const deviceToClient = new Map();
 
 // WebSocket readyState constant for readability
 const WS_OPEN = 1;
@@ -396,8 +398,15 @@ function handleJoinRoom(clientId, message, client, ws) {
   
   // Store the device ID if provided (for push notification matching)
   if (deviceId && typeof deviceId === 'string') {
+    // Remove old mapping if this device was connected before
+    const oldClientId = deviceToClient.get(deviceId);
+    if (oldClientId && oldClientId !== clientId) {
+      log.debug(`Device ${deviceId.substring(0, 8)}... was previously mapped to ${oldClientId.substring(0, 8)}..., updating to ${clientId.substring(0, 8)}...`);
+    }
+    
     client.deviceId = deviceId;
-    log.debug(`Client ${clientId} mapped to deviceId: ${deviceId.substring(0, 8)}...`);
+    deviceToClient.set(deviceId, clientId);
+    log.debug(`Client ${clientId.substring(0, 8)}... mapped to deviceId: ${deviceId.substring(0, 8)}...`);
   }
 
   // Check if room is full
@@ -654,11 +663,14 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
       return;
     }
 
-    // Check if peer is already connected via WebSocket
-    const peerClient = clients.get(peerClientId);
-    if (peerClient && peerClient.ws.readyState === WS_OPEN) {
-      log.debug(`[Push] Peer ${peerClientId} is already connected via WebSocket - skipping push notification`);
-      return;
+    // Check if peer is already connected via WebSocket (using deviceId lookup)
+    const peerWsClientId = deviceToClient.get(peerClientId);
+    if (peerWsClientId) {
+      const peerClient = clients.get(peerWsClientId);
+      if (peerClient && peerClient.ws.readyState === WS_OPEN) {
+        log.debug(`[Push] Peer device ${peerClientId.substring(0, 8)}... is already connected via WebSocket (clientId: ${peerWsClientId.substring(0, 8)}...) - skipping push notification`);
+        return;
+      }
     }
 
     // Send platform-specific push notification
@@ -726,6 +738,13 @@ function handleClientDisconnect(clientId, code, reason) {
   log.info(`Client ${clientId} disconnected - Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
   
   const client = clients.get(clientId);
+  
+  // Clean up device-to-client mapping
+  if (client && client.deviceId) {
+    deviceToClient.delete(client.deviceId);
+    log.debug(`Removed deviceId mapping for ${client.deviceId.substring(0, 8)}...`);
+  }
+  
   if (client && client.roomId && rooms.has(client.roomId)) {
     const roomId = client.roomId;
     const room = rooms.get(roomId);
