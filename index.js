@@ -619,109 +619,81 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
     log.debug(`[Push] 🔍 Tokens: client1_token=${!!roomData.client1_token}, client2_token=${!!roomData.client2_token}`);
     log.debug(`[Push] 🔍 Platforms: client1=${roomData.client1_platform}, client2=${roomData.client2_platform}`);
 
-    // Determine which client is the peer (the one NOT currently joining)
-    // IMPORTANT: Only ping the OTHER person, never yourself
-    // NOTE: joinedClientId might be a deviceId (iOS sends it) or a WebSocket clientId (Android old system doesn't send it)
-    let peerClientId, peerToken, peerPlatform;
+    // SEND TO BOTH DEVICES - client-side will handle suppression
+    const devicesToNotify = [];
     
-    if (roomData.client1 === joinedClientId && roomData.client2) {
-      // Joiner is client1, so ping client2
-      peerClientId = roomData.client2;
-      peerToken = roomData.client2_token;
-      peerPlatform = roomData.client2_platform;
-      log.debug(`[Push] ✅ Joiner is client1, targeting client2 (${peerClientId?.substring(0, 8)}...)`);
-    } else if (roomData.client2 === joinedClientId && roomData.client1) {
-      // Joiner is client2, so ping client1
-      peerClientId = roomData.client1;
-      peerToken = roomData.client1_token;
-      peerPlatform = roomData.client1_platform;
-      log.debug(`[Push] ✅ Joiner is client2, targeting client1 (${peerClientId?.substring(0, 8)}...)`);
-    } else {
-      // joinedClientId doesn't match either client1 or client2 in the database
-      // This happens when Android (old system) joins without sending deviceId
-      // In this case, we should ping whoever HAS a token (assume they're the peer)
-      log.warn(`[Push] ⚠️ joinedClientId (${joinedClientId?.substring(0, 16)}...) doesn't match client1 or client2!`);
-      if (roomData.client1_token) {
-        peerClientId = roomData.client1;
-        peerToken = roomData.client1_token;
-        peerPlatform = roomData.client1_platform;
-        log.debug(`[Push] Joiner not matched in DB (old Android?), targeting client1 (${peerClientId?.substring(0, 8)}...)`);
-      } else if (roomData.client2_token) {
-        peerClientId = roomData.client2;
-        peerToken = roomData.client2_token;
-        peerPlatform = roomData.client2_platform;
-        log.debug(`[Push] Joiner not matched in DB (old Android?), targeting client2 (${peerClientId?.substring(0, 8)}...)`);
-      } else {
-        log.debug(`[Push] No peer to notify in room ${roomId} (joiner: ${joinedClientId.substring(0, 8)}...)`);
-        return;
-      }
+    if (roomData.client1 && roomData.client1_token) {
+      devicesToNotify.push({
+        clientId: roomData.client1,
+        token: roomData.client1_token,
+        platform: roomData.client1_platform,
+        label: 'client1'
+      });
+    }
+    
+    if (roomData.client2 && roomData.client2_token) {
+      devicesToNotify.push({
+        clientId: roomData.client2,
+        token: roomData.client2_token,
+        platform: roomData.client2_platform,
+        label: 'client2'
+      });
     }
 
-    // Check if peer has a device token
-    if (!peerToken) {
-      log.debug(`[Push] Peer ${peerClientId} has no device token - skipping push notification`);
-      return;
-    }
+    log.debug(`[Push] Notifying ${devicesToNotify.length} device(s) in room ${roomId}`);
 
-    // Check if peer is already connected via WebSocket (using deviceId lookup)
-    const peerWsClientId = deviceToClient.get(peerClientId);
-    if (peerWsClientId) {
-      const peerClient = clients.get(peerWsClientId);
-      if (peerClient && peerClient.ws.readyState === WS_OPEN) {
-        log.debug(`[Push] Peer device ${peerClientId.substring(0, 8)}... is already connected via WebSocket (clientId: ${peerWsClientId.substring(0, 8)}...) - skipping push notification`);
-        return;
-      }
-    }
-
-    // Send platform-specific push notification
-    if (peerPlatform === 'ios') {
-      const result = await apnsService.sendPresenceNotification(
-        peerToken,
-        roomId,
-        'Someone is waiting in your chat room'
-      );
-
-      if (result.success) {
-        log.info(`[Push] ✅ Sent iOS notification to peer ${peerClientId} for room ${roomId}`);
-      } else {
-        log.error(`[Push] ❌ Failed to send iOS notification to peer ${peerClientId}:`, result.error);
-        
-        // If token is invalid, remove it from database
-        if (result.shouldPurgeToken) {
-          log.warn(`[Push] Purging invalid token for ${peerClientId} in room ${roomId}`);
-          // Update the database to null out the invalid token
-          if (roomData.client1 === peerClientId && dbHooks.updateRoomToken) {
-            await dbHooks.updateRoomToken(roomId, 'client1', null);
-          } else if (roomData.client2 === peerClientId && dbHooks.updateRoomToken) {
-            await dbHooks.updateRoomToken(roomId, 'client2', null);
-          }
+    // Send notification to all devices with tokens
+    for (const device of devicesToNotify) {
+      // Check if device is already connected via WebSocket (using deviceId lookup)
+      const peerWsClientId = deviceToClient.get(device.clientId);
+      if (peerWsClientId) {
+        const peerClient = clients.get(peerWsClientId);
+        if (peerClient && peerClient.ws.readyState === WS_OPEN) {
+          log.debug(`[Push] Device ${device.clientId.substring(0, 8)}... (${device.label}) is already connected via WebSocket - skipping push notification`);
+          continue;
         }
       }
-    } else if (peerPlatform === 'android') {
-      const result = await fcmService.sendPresenceNotification(
-        peerToken,
-        roomId,
-        'Someone is waiting in your chat room'
-      );
 
-      if (result.success) {
-        log.info(`[Push] ✅ Sent Android notification to peer ${peerClientId} for room ${roomId}`);
-      } else {
-        log.error(`[Push] ❌ Failed to send Android notification to peer ${peerClientId}:`, result.error);
-        
-        // If token is invalid, remove it from database
-        if (result.shouldPurgeToken) {
-          log.warn(`[Push] Purging invalid token for ${peerClientId} in room ${roomId}`);
-          // Update the database to null out the invalid token
-          if (roomData.client1 === peerClientId && dbHooks.updateRoomToken) {
-            await dbHooks.updateRoomToken(roomId, 'client1', null);
-          } else if (roomData.client2 === peerClientId && dbHooks.updateRoomToken) {
-            await dbHooks.updateRoomToken(roomId, 'client2', null);
+      // Send platform-specific push notification
+      if (device.platform === 'ios') {
+        const result = await apnsService.sendPresenceNotification(
+          device.token,
+          roomId,
+          'Someone is waiting in your chat room'
+        );
+
+        if (result.success) {
+          log.info(`[Push] ✅ Sent iOS notification to ${device.label} (${device.clientId.substring(0, 8)}...) for room ${roomId}`);
+        } else {
+          log.error(`[Push] ❌ Failed to send iOS notification to ${device.label} (${device.clientId.substring(0, 8)}...):`, result.error);
+          
+          // If token is invalid, remove it from database
+          if (result.shouldPurgeToken && dbHooks.updateRoomToken) {
+            log.warn(`[Push] Purging invalid token for ${device.label} in room ${roomId}`);
+            await dbHooks.updateRoomToken(roomId, device.label, null);
           }
         }
+      } else if (device.platform === 'android') {
+        const result = await fcmService.sendPresenceNotification(
+          device.token,
+          roomId,
+          'Someone is waiting in your chat room'
+        );
+
+        if (result.success) {
+          log.info(`[Push] ✅ Sent Android notification to ${device.label} (${device.clientId.substring(0, 8)}...) for room ${roomId}`);
+        } else {
+          log.error(`[Push] ❌ Failed to send Android notification to ${device.label} (${device.clientId.substring(0, 8)}...):`, result.error);
+          
+          // If token is invalid, remove it from database
+          if (result.shouldPurgeToken && dbHooks.updateRoomToken) {
+            log.warn(`[Push] Purging invalid token for ${device.label} in room ${roomId}`);
+            await dbHooks.updateRoomToken(roomId, device.label, null);
+          }
+        }
+      } else {
+        log.warn(`[Push] Unknown platform '${device.platform}' for ${device.label}`);
       }
-    } else {
-      log.warn(`[Push] Unknown platform '${peerPlatform}' for peer ${peerClientId}`);
     }
 
   } catch (error) {
