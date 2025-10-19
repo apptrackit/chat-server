@@ -354,9 +354,11 @@ wss.on('connection', (ws, req) => {
           break;
         }
         
+        // CRITICAL: Must use deviceId (which matches client1/client2 in DB), not WebSocket clientId
         const deviceId = client.deviceId || clientId;
-        log.info(`[Ping] 🔔 Manual ping request from ${deviceId.substring(0, 8)}... in room ${roomId}`);
-        log.debug(`[Ping] Using deviceId: ${deviceId.substring(0, 16)}..., clientId: ${clientId.substring(0, 16)}...`);
+        log.info(`[Ping] 🔔 Manual ping request from deviceId ${deviceId} in room ${roomId}`);
+        log.debug(`[Ping] Full deviceId: ${deviceId}, WebSocket clientId: ${clientId}`);
+        log.debug(`[Ping] client.deviceId is ${client.deviceId ? 'SET' : 'NOT SET'} - using ${deviceId === client.deviceId ? 'client.deviceId' : 'fallback clientId'}`);
         
         sendPushNotificationToPeer(roomId, deviceId).catch(err => {
           log.error(`[Ping] Failed to send manual ping for room ${roomId}:`, err.message);
