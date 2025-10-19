@@ -358,7 +358,7 @@ wss.on('connection', (ws, req) => {
         const deviceId = client.deviceId || clientId;
         log.info(`[Ping] Manual ping request from ${deviceId.substring(0, 8)}... in room ${roomId}`);
         
-        sendPushNotificationToPeer(roomId, deviceId).catch(err => {
+        sendPushNotificationToPeer(roomId, deviceId, clientId).catch(err => {
           log.error(`[Ping] Failed to send manual ping for room ${roomId}:`, err.message);
         });
         
@@ -483,10 +483,10 @@ function handleJoinRoom(clientId, message, client, ws) {
 
   // ========== PUSH NOTIFICATION LOGIC ==========
   // If only one user in room, check if peer exists and send push notification
-  if (userCount === 1 && USE_DB && dbHooks) {
+    if (userCount === 1 && USE_DB && dbHooks) {
     // Use deviceId if available, fall back to clientId
     const joinerDeviceId = client.deviceId || clientId;
-    sendPushNotificationToPeer(roomId, joinerDeviceId).catch(err => {
+    sendPushNotificationToPeer(roomId, joinerDeviceId, clientId).catch(err => {
       log.error(`Failed to send push notification for room ${roomId}:`, err.message);
     });
   }
@@ -603,8 +603,9 @@ function handleLeaveRoom(clientId, client, ws) {
  * @param {string} roomId - The room ID
  * @param {string} joinedClientId - The client ID of the user who just joined (may be deviceId or WebSocket clientId)
  */
-async function sendPushNotificationToPeer(roomId, joinedClientId) {
+async function sendPushNotificationToPeer(roomId, joinedClientId, invokingWsClientId = null) {
   try {
+    log.debug(`[Push] sendPushNotificationToPeer called - roomId: ${roomId}, joinedClientId: ${String(joinedClientId).substring(0,12)}..., invokingWsClientId: ${String(invokingWsClientId).substring(0,12)}...`);
     // Fetch room details from database
     const roomData = await dbHooks.getRoomById(roomId);
     
@@ -617,6 +618,7 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
     // IMPORTANT: Only ping the OTHER person, never yourself (same logic for iOS and Android)
     let peerClientId, peerToken, peerPlatform, peerLabel;
     
+    // Strategy A: direct deviceId match (preferred)
     if (roomData.client1 === joinedClientId && roomData.client2) {
       // Joiner is client1, so ping client2
       peerClientId = roomData.client2;
@@ -631,21 +633,56 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
       log.debug(`[Push] Joiner is client2, targeting client1 (${peerClientId?.substring(0, 8)}...)`);
     } else {
       // joinedClientId doesn't match either client1 or client2 in the database
-      // This happens when Android (old system) joins without sending deviceId
-      // In this case, we should ping whoever HAS a token (assume they're the peer)
-      if (roomData.client1_token) {
-        peerClientId = roomData.client1;
-        peerToken = roomData.client1_token;
-        peerPlatform = roomData.client1_platform;
-        log.debug(`[Push] Joiner not matched in DB (old Android?), targeting client1 (${peerClientId?.substring(0, 8)}...)`);
-      } else if (roomData.client2_token) {
-        peerClientId = roomData.client2;
-        peerToken = roomData.client2_token;
-        peerPlatform = roomData.client2_platform;
-        log.debug(`[Push] Joiner not matched in DB (old Android?), targeting client2 (${peerClientId?.substring(0, 8)}...)`);
-      } else {
-        log.debug(`[Push] No peer to notify in room ${roomId} (joiner: ${joinedClientId.substring(0, 8)}...)`);
-        return;
+      log.debug(`[Push] joinedClientId (${joinedClientId?.substring(0,8)}...) doesn't match client1/client2 in DB - trying fallback strategies`);
+
+      // Strategy B: If invokingWsClientId is provided, try to infer deviceId from current WS session mapping
+      if (invokingWsClientId) {
+        // If the invoking WS client has a stored deviceId, use that to determine peer
+        const invokingDevice = Array.from(deviceToClient.entries()).find(([dev, cid]) => cid === invokingWsClientId)?.[0];
+        if (invokingDevice) {
+          log.debug(`[Push] Found invoking device mapping: ${invokingDevice.substring(0,8)}... for ws client ${invokingWsClientId.substring(0,8)}...`);
+          // If invokingDevice matches client1, ping client2
+          if (roomData.client1 === invokingDevice && roomData.client2) {
+            peerClientId = roomData.client2;
+            peerToken = roomData.client2_token;
+            peerPlatform = roomData.client2_platform;
+            log.debug(`[Push] Invoking device is client1, targeting client2 (${peerClientId?.substring(0,8)}...)`);
+          } else if (roomData.client2 === invokingDevice && roomData.client1) {
+            peerClientId = roomData.client1;
+            peerToken = roomData.client1_token;
+            peerPlatform = roomData.client1_platform;
+            log.debug(`[Push] Invoking device is client2, targeting client1 (${peerClientId?.substring(0,8)}...)`);
+          }
+        }
+      }
+
+      // Strategy C: Fallback to token heuristics - notify whichever side has a token and is likely offline
+      if (!peerClientId) {
+        if (roomData.client1_token && !roomData.client2_token) {
+          peerClientId = roomData.client1;
+          peerToken = roomData.client1_token;
+          peerPlatform = roomData.client1_platform;
+          log.debug(`[Push] Fallback: targeting client1 by token availability (${peerClientId?.substring(0,8)}...)`);
+        } else if (roomData.client2_token && !roomData.client1_token) {
+          peerClientId = roomData.client2;
+          peerToken = roomData.client2_token;
+          peerPlatform = roomData.client2_platform;
+          log.debug(`[Push] Fallback: targeting client2 by token availability (${peerClientId?.substring(0,8)}...)`);
+        } else if (roomData.client1_token) {
+          // Both have tokens or ambiguous - default to client1
+          peerClientId = roomData.client1;
+          peerToken = roomData.client1_token;
+          peerPlatform = roomData.client1_platform;
+          log.debug(`[Push] Ambiguous fallback: defaulting to client1 (${peerClientId?.substring(0,8)}...)`);
+        } else if (roomData.client2_token) {
+          peerClientId = roomData.client2;
+          peerToken = roomData.client2_token;
+          peerPlatform = roomData.client2_platform;
+          log.debug(`[Push] Ambiguous fallback: defaulting to client2 (${peerClientId?.substring(0,8)}...)`);
+        } else {
+          log.debug(`[Push] No peer to notify in room ${roomId} (joiner: ${joinedClientId?.substring(0, 8)}...)`);
+          return;
+        }
       }
     }
 
