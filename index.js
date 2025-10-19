@@ -356,9 +356,7 @@ wss.on('connection', (ws, req) => {
         
         // CRITICAL: Must use deviceId (which matches client1/client2 in DB), not WebSocket clientId
         const deviceId = client.deviceId || clientId;
-        log.info(`[Ping] 🔔 Manual ping request from deviceId ${deviceId} in room ${roomId}`);
-        log.debug(`[Ping] Full deviceId: ${deviceId}, WebSocket clientId: ${clientId}`);
-        log.debug(`[Ping] client.deviceId is ${client.deviceId ? 'SET' : 'NOT SET'} - using ${deviceId === client.deviceId ? 'client.deviceId' : 'fallback clientId'}`);
+        log.info(`[Ping] Manual ping request from ${deviceId.substring(0, 8)}... in room ${roomId}`);
         
         sendPushNotificationToPeer(roomId, deviceId).catch(err => {
           log.error(`[Ping] Failed to send manual ping for room ${roomId}:`, err.message);
@@ -607,8 +605,6 @@ function handleLeaveRoom(clientId, client, ws) {
  */
 async function sendPushNotificationToPeer(roomId, joinedClientId) {
   try {
-    log.debug(`[Push] 🔍 sendPushNotificationToPeer called - roomId: ${roomId}, joinedClientId: ${joinedClientId?.substring(0, 16)}...`);
-    
     // Fetch room details from database
     const roomData = await dbHooks.getRoomById(roomId);
     
@@ -616,10 +612,6 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
       log.warn(`[Push] Room ${roomId} not found in database - cannot send push notification`);
       return;
     }
-
-    log.debug(`[Push] 🔍 Room data: client1=${roomData.client1?.substring(0, 16)}..., client2=${roomData.client2?.substring(0, 16)}...`);
-    log.debug(`[Push] 🔍 Tokens: client1_token=${!!roomData.client1_token}, client2_token=${!!roomData.client2_token}`);
-    log.debug(`[Push] 🔍 Platforms: client1=${roomData.client1_platform}, client2=${roomData.client2_platform}`);
 
     // Determine which client is the peer (the one NOT currently joining)
     // IMPORTANT: Only ping the OTHER person, never yourself (same logic for iOS and Android)
@@ -630,20 +622,31 @@ async function sendPushNotificationToPeer(roomId, joinedClientId) {
       peerClientId = roomData.client2;
       peerToken = roomData.client2_token;
       peerPlatform = roomData.client2_platform;
-      peerLabel = 'client2';
-      log.debug(`[Push] ✅ Joiner is client1, targeting client2 (${peerClientId?.substring(0, 8)}...)`);
+      log.debug(`[Push] Joiner is client1, targeting client2 (${peerClientId?.substring(0, 8)}...)`);
     } else if (roomData.client2 === joinedClientId && roomData.client1) {
       // Joiner is client2, so ping client1
       peerClientId = roomData.client1;
       peerToken = roomData.client1_token;
       peerPlatform = roomData.client1_platform;
-      peerLabel = 'client1';
-      log.debug(`[Push] ✅ Joiner is client2, targeting client1 (${peerClientId?.substring(0, 8)}...)`);
+      log.debug(`[Push] Joiner is client2, targeting client1 (${peerClientId?.substring(0, 8)}...)`);
     } else {
       // joinedClientId doesn't match either client1 or client2 in the database
-      log.warn(`[Push] ⚠️ joinedClientId (${joinedClientId?.substring(0, 16)}...) doesn't match client1 or client2!`);
-      log.warn(`[Push] ⚠️ Cannot determine peer - skipping notification`);
-      return;
+      // This happens when Android (old system) joins without sending deviceId
+      // In this case, we should ping whoever HAS a token (assume they're the peer)
+      if (roomData.client1_token) {
+        peerClientId = roomData.client1;
+        peerToken = roomData.client1_token;
+        peerPlatform = roomData.client1_platform;
+        log.debug(`[Push] Joiner not matched in DB (old Android?), targeting client1 (${peerClientId?.substring(0, 8)}...)`);
+      } else if (roomData.client2_token) {
+        peerClientId = roomData.client2;
+        peerToken = roomData.client2_token;
+        peerPlatform = roomData.client2_platform;
+        log.debug(`[Push] Joiner not matched in DB (old Android?), targeting client2 (${peerClientId?.substring(0, 8)}...)`);
+      } else {
+        log.debug(`[Push] No peer to notify in room ${roomId} (joiner: ${joinedClientId.substring(0, 8)}...)`);
+        return;
+      }
     }
 
     // Check if peer has a device token
